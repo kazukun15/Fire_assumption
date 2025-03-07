@@ -42,7 +42,7 @@ selected_fuel = st.sidebar.selectbox("燃料特性を選択してください", 
 fuel_type = fuel_options[selected_fuel]
 
 # メインエリア：タイトル
-st.title("火災拡大シミュレーション（半円形表示 + 詳細プロンプト + JSON表示）")
+st.title("火災拡大シミュレーション（半円形 + 詳細プロンプト + JSON表示）")
 
 # セッションに発生地点リストが無い場合は初期化
 if 'points' not in st.session_state:
@@ -60,7 +60,7 @@ st_folium(m, width=700, height=500)
 def get_weather(lat, lon):
     """
     指定した緯度・経度の現在の気象情報を、Open-Meteo APIから取得する関数。
-    詳細な情報として、温度、風速、風向、天気コードに加えて、相対湿度と降水量を取得。
+    温度、風速、風向、天気コード、湿度、降水量を取得。
     """
     url = (
         f"https://api.open-meteo.com/v1/forecast?"
@@ -68,6 +68,8 @@ def get_weather(lat, lon):
         f"hourly=relativehumidity_2m,precipitation&timezone=auto"
     )
     response = requests.get(url)
+    # Open-Meteo API のステータスコードを表示
+    st.write("Open-Meteo API ステータスコード:", response.status_code)
     data = response.json()
     current = data.get("current_weather", {})
     result = {
@@ -76,7 +78,6 @@ def get_weather(lat, lon):
         'winddirection': current.get("winddirection"),
         'weathercode': current.get("weathercode")
     }
-    # 取得した現在時刻と一致する湿度と降水量を hourly 部分から抽出
     current_time = current.get("time")
     if current_time and "hourly" in data:
         times = data["hourly"].get("time", [])
@@ -88,16 +89,16 @@ def get_weather(lat, lon):
 
 def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_deg):
     """
-    風向きを中心とした ±90° の半円形（扇形）Polygon を作成する関数。
+    風向きの方向を中心とした ±90° の半円形（扇形）Polygon を作成する関数。
     wind_direction_deg: 0=北, 90=東, 180=南, 270=西（度数）
     radius_m: 半径（メートル）
     """
-    deg_per_meter = 1.0 / 111000.0  # 簡易換算
+    deg_per_meter = 1.0 / 111000.0
     start_angle = wind_direction_deg - 90
     end_angle = wind_direction_deg + 90
     num_steps = 36
     coords = []
-    coords.append((center_lat, center_lon))  # 中心点
+    coords.append((center_lat, center_lon))
     for i in range(num_steps + 1):
         angle_deg = start_angle + (end_angle - start_angle) * i / num_steps
         angle_rad = math.radians(angle_deg)
@@ -112,7 +113,7 @@ def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_
 
 def gemini_generate_text(prompt, api_key, model_name):
     """
-    Gemini API のエンドポイントに対してリクエストを送り、テキスト生成を行う関数。
+    Gemini API のエンドポイントにリクエストを送り、テキスト生成を行う関数。
     生のJSON応答も返す。
     """
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
@@ -123,6 +124,7 @@ def gemini_generate_text(prompt, api_key, model_name):
         }]
     }
     response = requests.post(url, headers=headers, json=data)
+    st.write("Gemini API ステータスコード:", response.status_code)
     raw_json = None
     try:
         raw_json = response.json()
@@ -140,23 +142,21 @@ def gemini_generate_text(prompt, api_key, model_name):
 
 def predict_fire_spread(points, weather, duration_hours, api_key, model_name):
     """
-    Gemini API を利用して、火災拡大の予測を行う関数。
-    出力は以下の JSON 形式で返すこと:
+    Gemini API を利用して火災拡大の予測を行う関数。
+    出力は以下の JSON 形式:
       {"radius_m": <float>, "area_sqm": <float>, "water_volume_tons": <float>}
-    燃料特性は選択された fuel_type を含む。
+    燃料特性 (fuel_type) もプロンプトに含む。
     """
     rep_lat, rep_lon = points[0]
     wind_speed = weather['windspeed']
     wind_dir = weather['winddirection']
 
-    # 追加情報（仮の値）
     slope_info = "10度程度の傾斜"
     elevation_info = "標高150m程度"
     vegetation_info = "松林と草地が混在"
     humidity_info = f"相対湿度 {weather.get('humidity', '不明')}%"
     precipitation_info = f"{weather.get('precipitation', '不明')} mm/h"
 
-    # 詳細なプロンプト
     detailed_prompt = f"""
 あなたは火災拡大シミュレーションの専門家です。以下の条件に基づき、火災の拡大予測を数値で出力してください。
 条件:
