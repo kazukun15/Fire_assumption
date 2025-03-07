@@ -70,6 +70,7 @@ def calculate_water_volume(area_sqm):
 def gemini_generate_text(prompt, api_key, model_name):
     """
     Gemini API のエンドポイントに対してリクエストを送り、テキスト生成を行う関数
+    生成されたテキストと生のAPI応答（JSON）をタプルで返す
     """
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
@@ -81,17 +82,16 @@ def gemini_generate_text(prompt, api_key, model_name):
     response = requests.post(url, headers=headers, data=json.dumps(data))
     if response.status_code == 200:
         result = response.json()
-        # 例: {"candidates": [{"output": "{...}"}]}
         candidates = result.get("candidates", [])
         if candidates:
             generated_text = candidates[0].get("output", "").strip()
-            return generated_text
+            return generated_text, result
         else:
             st.error("API 応答に候補が含まれていません。")
-            return None
+            return None, result
     else:
         st.error(f"APIリクエストに失敗しました。ステータスコード: {response.status_code}\n{response.text}")
-        return None
+        return None, None
 
 def predict_fire_spread(points, weather, duration_hours, api_key, model_name):
     """
@@ -119,13 +119,17 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name):
         "water_volume_tons": 値
     }}
     """
-    generated_text = gemini_generate_text(prompt, api_key, model_name)
+    generated_text, raw_response = gemini_generate_text(prompt, api_key, model_name)
     if generated_text is None:
+        st.error("テキスト生成に失敗しました。")
+        if raw_response is not None:
+            st.json(raw_response)
         return None
     try:
         prediction_json = json.loads(generated_text)
     except Exception as e:
         st.error("予測結果の解析に失敗しました。APIの応答内容を確認してください。")
+        st.json(raw_response)  # 生のJSON応答を表示
         return None
 
     # 発生地点群の重心を求め、そこを中心に半径分のバッファ（円）を作成
