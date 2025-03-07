@@ -10,10 +10,9 @@ import json
 # ページ設定
 st.set_page_config(page_title="火災拡大シミュレーション", layout="wide")
 
-# サイドバー：APIキーとモデル名の設定
-st.sidebar.title("設定")
-API_KEY = st.sidebar.text_input("APIキーを入力してください", type="password")
-MODEL_NAME = "gemini-2.0-flash-001"
+# グローバル設定（secretsからAPIキーを取得）
+API_KEY = st.secrets["general"]["api_key"]
+MODEL_NAME = "gemini-2.0-flash-001"  # 使用するモデル名
 
 # サイドバー：火災発生地点の入力
 st.sidebar.title("火災発生地点の入力")
