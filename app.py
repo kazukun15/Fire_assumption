@@ -26,6 +26,11 @@ with st.sidebar.form(key='location_form'):
         st.session_state.points.append((lat_input, lon_input))
         st.sidebar.success(f"地点 ({lat_input}, {lon_input}) を追加しました。")
 
+# サイドバー：登録地点消去ボタン
+if st.sidebar.button("登録地点を消去"):
+    st.session_state.points = []
+    st.sidebar.info("全ての発生地点を削除しました。")
+
 # メインエリア：タイトル
 st.title("火災拡大シミュレーション")
 
