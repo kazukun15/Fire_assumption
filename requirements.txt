@@ -1,7 +1,7 @@
 streamlit
-requests
-shapely
-geopandas
 folium
 streamlit-folium
+shapely
+geopandas
 openai
+requests
