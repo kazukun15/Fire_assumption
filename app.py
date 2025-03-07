@@ -32,7 +32,7 @@ if st.sidebar.button("登録地点を消去"):
     st.session_state.points = []
     st.sidebar.info("全ての発生地点を削除しました。")
 
-# サイドバー： 燃料特性の選択
+# サイドバー：燃料特性の選択
 st.sidebar.title("燃料特性の選択")
 fuel_options = {
     "森林（高燃料）": "森林",
@@ -184,22 +184,28 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name):
     generated_text, raw_json = gemini_generate_text(detailed_prompt, api_key, model_name)
     st.write("### Gemini API 生JSON応答")
     if raw_json:
-        with st.expander("生JSON応答 (折りたたみ)"):
+        with st.expander("生JSON応答 (折りたたみ)") as exp:
             st.json(raw_json)
     else:
         st.warning("Gemini APIからJSON形式の応答が得られませんでした。")
     if not generated_text:
-        st.error("Gemini APIから有効な応答が得られませんでした。")
+        # 有効な応答が得られなかった場合、raw_json の text 部分をマークダウン形式で表示する
+        if raw_json:
+            raw_text = json.dumps(raw_json, indent=2, ensure_ascii=False)
+            st.markdown("#### Gemini APIから有効な応答が得られませんでした。返却されたJSON:")
+            st.markdown(f"```json\n{raw_text}\n```")
+        else:
+            st.error("Gemini APIから有効な応答が得られませんでした。")
         return None
 
-    # マークダウンのコードブロックからJSON部分を抽出
+    # マークダウンコードブロックからJSON部分を抽出
     extracted_text = extract_json(generated_text)
     try:
         prediction_json = json.loads(extracted_text)
     except Exception as e:
         st.error("予測結果の解析に失敗しました。返されたテキストを確認してください。")
         st.write("返却されたテキスト:")
-        st.write(generated_text)
+        st.markdown(f"```json\n{generated_text}\n```")
         return None
     return prediction_json
 
