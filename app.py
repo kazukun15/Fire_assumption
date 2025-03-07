@@ -6,7 +6,6 @@ import geopandas as gpd
 import requests
 import json
 import math
-import numpy as np
 
 # ページ設定
 st.set_page_config(page_title="火災拡大シミュレーション", layout="wide")
@@ -33,7 +32,7 @@ if st.sidebar.button("登録地点を消去"):
     st.sidebar.info("全ての発生地点を削除しました。")
 
 # メインエリア：タイトル
-st.title("火災拡大シミュレーション（半円形表示 + 詳細プロンプト）")
+st.title("火災拡大シミュレーション（半円形 + 詳細プロンプト + JSON表示）")
 
 # セッションに発生地点リストが無い場合は初期化
 if 'points' not in st.session_state:
@@ -57,12 +56,42 @@ def get_weather(lat, lon):
     data = response.json()
     return {
         'wind_speed': data['current_weather']['windspeed'],
-        'wind_direction': data['current_weather']['winddirection']  # 0=北,90=東,180=南,270=西(概念)
+        'wind_direction': data['current_weather']['winddirection']  # 0=北,90=東,180=南,270=西
     }
+
+def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_deg):
+    """
+    風向きの方向を中心とした ±90° の半円形（扇形）Polygon を作成する。
+    wind_direction_deg: 0=北, 90=東, 180=南, 270=西（度数）
+    radius_m: 半径（メートル）
+    """
+    deg_per_meter = 1.0 / 111000.0  # 簡易換算
+
+    start_angle = wind_direction_deg - 90
+    end_angle = wind_direction_deg + 90
+    num_steps = 36  # ステップ数
+
+    coords = []
+    coords.append((center_lat, center_lon))  # 中心点を先頭に追加
+
+    for i in range(num_steps + 1):
+        angle_deg = start_angle + (end_angle - start_angle) * i / num_steps
+        angle_rad = math.radians(angle_deg)
+        offset_y_m = radius_m * math.cos(angle_rad)  # 北向きがy
+        offset_x_m = radius_m * math.sin(angle_rad)  # 東向きがx
+
+        offset_lat = offset_y_m * deg_per_meter
+        offset_lon = offset_x_m * deg_per_meter
+        new_lat = center_lat + offset_lat
+        new_lon = center_lon + offset_lon
+        coords.append((new_lat, new_lon))
+
+    return coords
 
 def gemini_generate_text(prompt, api_key, model_name):
     """
     Gemini API のエンドポイントに対してリクエストを送り、テキスト生成を行う関数
+    生のJSON応答も一緒に返す
     """
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
@@ -72,84 +101,43 @@ def gemini_generate_text(prompt, api_key, model_name):
         }]
     }
     response = requests.post(url, headers=headers, json=data)
+
+    # 生JSONを保存しておく
+    raw_json = None
+    try:
+        raw_json = response.json()
+    except:
+        pass
+
     if response.status_code == 200:
-        result = response.json()
-        candidates = result.get("candidates", [])
-        if candidates:
-            generated_text = candidates[0].get("output", "").strip()
-            return generated_text
+        if raw_json is not None:
+            candidates = raw_json.get("candidates", [])
+            if candidates:
+                generated_text = candidates[0].get("output", "").strip()
+                return generated_text, raw_json
+            else:
+                return None, raw_json
         else:
-            st.error("API 応答に候補が含まれていません。")
-            return None
+            return None, None
     else:
-        st.error(f"APIリクエストに失敗しました。ステータスコード: {response.status_code}\n{response.text}")
-        return None
-
-def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_deg):
-    """
-    風向きの方向を中心とした ±90° の半円形（扇形）Polygon を作成する。
-    wind_direction_deg: 0=北, 90=東, 180=南, 270=西（度数）
-    radius_m: 半径（メートル）
-    """
-    # 1度 ≈ 111,000m (緯度方向)
-    # 経度方向は緯度によって縮尺が変わるが、簡易的に同一係数で計算
-    deg_per_meter = 1.0 / 111000.0
-
-    # 半円（扇形）を描画する角度範囲
-    # wind_direction_deg - 90° から wind_direction_deg + 90° まで
-    start_angle = wind_direction_deg - 90
-    end_angle = wind_direction_deg + 90
-    num_steps = 36  # ステップ数（細かくするほど滑らかな扇形）
-
-    # 扇形の座標を格納するリスト
-    coords = []
-    # 中心点を (lat, lon) -> (y, x) の順で入れておく
-    center_point = (center_lat, center_lon)
-
-    # 最初に中心点を追加（Polygonを閉じるために使う場合もある）
-    coords.append(center_point)
-
-    # 指定した角度範囲をステップごとにループ
-    for i in range(num_steps + 1):
-        angle_deg = start_angle + (end_angle - start_angle) * i / num_steps
-        # ラジアンに変換
-        angle_rad = math.radians(angle_deg)
-        # メートル単位で x, y のオフセットを計算（y軸=北向き, x軸=東向き）
-        # ただし angle_deg=0 は北向きではなく、気象庁などの方角定義に合わせるなら要調整
-        # ここでは 0=北、90=東 という前提で計算
-        offset_y_m = radius_m * math.cos(angle_rad)
-        offset_x_m = radius_m * math.sin(angle_rad)
-
-        # 緯度・経度への変換（簡易計算）
-        offset_lat = offset_y_m * deg_per_meter
-        offset_lon = offset_x_m * deg_per_meter
-
-        # 実際の座標
-        new_lat = center_lat + offset_lat
-        new_lon = center_lon + offset_lon
-        coords.append((new_lat, new_lon))
-
-    # 戻り値は Polygon 化できるよう (lat, lon) のリスト
-    return coords
+        return None, raw_json
 
 def predict_fire_spread(points, weather, duration_hours, api_key, model_name):
     """
     Gemini API を利用して、火災拡大の予測を行う関数
     出力はJSON形式で {"radius_m": 値, "area_sqm": 値, "water_volume_tons": 値} を想定
     """
-    # 複数地点がある場合、最初の地点を代表地点とする（例）
     rep_lat, rep_lon = points[0]
     wind_speed = weather['wind_speed']
     wind_dir = weather['wind_direction']
 
-    # 例: 地形や植生、湿度などの情報を仮に固定して入れる
-    # 実際には別途APIやデータベースから取得可能
+    # 地形などの追加情報（ダミー）
     slope_info = "10度程度の傾斜"
     vegetation_info = "松林と草地が混在"
     humidity_info = "相対湿度 60%"
     elevation_info = "標高 150m 程度"
 
-    # 詳細なプロンプトを作成
+    # 詳細プロンプト
     detailed_prompt = f"""
 あなたは高度な火災シミュレーションモデルです。
 以下の情報を踏まえて、可能な限り詳細に火災の広がりを分析してください。
@@ -182,13 +170,20 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name):
 }}
 """
 
-    # Gemini API を呼び出し
-    generated_text = gemini_generate_text(detailed_prompt, api_key, model_name)
+    generated_text, raw_json = gemini_generate_text(detailed_prompt, api_key, model_name)
+
+    # 生JSON応答を表示（成功・失敗に関わらず）
+    st.write("### Gemini API 生JSON応答")
+    if raw_json:
+        st.json(raw_json)
+    else:
+        st.warning("Gemini APIからJSON形式の応答が得られませんでした。")
+
     if not generated_text:
-        st.error("Gemini APIからの応答がありません。")
+        st.error("Gemini APIからの有効な応答がありません。")
         return None
 
-    # JSON解析
+    # 解析
     try:
         prediction_json = json.loads(generated_text)
     except Exception as e:
@@ -198,17 +193,6 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name):
         return None
 
     return prediction_json
-
-# 気象データ取得ボタン
-if st.button("気象データ取得"):
-    if len(st.session_state.points) > 0:
-        # 1つ目の発生地点を基準に気象情報を取得
-        lat_weather, lon_weather = st.session_state.points[0]
-        weather_data = get_weather(lat_weather, lon_weather)
-        st.session_state.weather_data = weather_data
-        st.write(f"取得した気象データ: {weather_data}")
-    else:
-        st.warning("発生地点を追加してください。")
 
 def run_simulation(duration_hours, time_label):
     if 'weather_data' not in st.session_state:
@@ -229,9 +213,9 @@ def run_simulation(duration_hours, time_label):
         return
 
     # 結果を取得
-    radius_m = prediction_json["radius_m"]
-    area_sqm = prediction_json["area_sqm"]
-    water_volume_tons = prediction_json["water_volume_tons"]
+    radius_m = prediction_json.get("radius_m", 0)
+    area_sqm = prediction_json.get("area_sqm", 0)
+    water_volume_tons = prediction_json.get("water_volume_tons", 0)
 
     # 表示
     st.write(f"### シミュレーション結果 ({time_label})")
@@ -246,7 +230,6 @@ def run_simulation(duration_hours, time_label):
     wind_dir = st.session_state.weather_data["wind_direction"]
 
     coords = create_half_circle_polygon(lat_center, lon_center, radius_m, wind_dir)
-    # folium で描画
     m_sim = folium.Map(location=[lat_center, lon_center], zoom_start=13)
     folium.Polygon(
         locations=coords,
@@ -260,6 +243,17 @@ def run_simulation(duration_hours, time_label):
         folium.Marker(location=pt, icon=folium.Icon(color='red')).add_to(m_sim)
 
     st_folium(m_sim, width=700, height=500)
+
+# 気象データ取得ボタン
+if st.button("気象データ取得"):
+    if len(st.session_state.points) > 0:
+        # 1つ目の発生地点を基準に気象情報を取得
+        lat_weather, lon_weather = st.session_state.points[0]
+        weather_data = get_weather(lat_weather, lon_weather)
+        st.session_state.weather_data = weather_data
+        st.write(f"取得した気象データ: {weather_data}")
+    else:
+        st.warning("発生地点を追加してください。")
 
 st.write("## 消火活動が行われない場合のシミュレーション")
 
