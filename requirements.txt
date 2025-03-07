@@ -4,3 +4,4 @@ shapely
 geopandas
 folium
 streamlit-folium
+openai
