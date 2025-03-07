@@ -5,7 +5,6 @@ from shapely.geometry import Point
 import geopandas as gpd
 import requests
 import json
-import google.generativeai as genai  # Gemini API 用ライブラリ
 
 # ページ設定
 st.set_page_config(page_title="火災拡大シミュレーション", layout="wide")
@@ -17,8 +16,8 @@ MODEL_NAME = "gemini-2.0-flash-001"  # 使用するモデル名
 # サイドバー：火災発生地点の入力
 st.sidebar.title("火災発生地点の入力")
 with st.sidebar.form(key='location_form'):
-    lat_input = st.number_input("緯度", format="%.6f", value=33.9500)
-    lon_input = st.number_input("経度", format="%.6f", value=132.7500)
+    lat_input = st.number_input("緯度", format="%.6f", value=34.257586)
+    lon_input = st.number_input("経度", format="%.6f", value=133.204356)
     add_point = st.form_submit_button("発生地点を追加")
     if add_point:
         if 'points' not in st.session_state:
@@ -38,8 +37,8 @@ st.title("火災拡大シミュレーション")
 if 'points' not in st.session_state:
     st.session_state.points = []
 
-# ベースマップの作成（初期位置は愛媛県上島町）
-initial_location = [33.9500, 132.7500]
+# ベースマップの作成（初期位置は指定座標）
+initial_location = [34.25758634545399, 133.20435568517337]
 m = folium.Map(location=initial_location, zoom_start=12)
 for point in st.session_state.points:
     folium.Marker(location=point, icon=folium.Icon(color='red')).add_to(m)
@@ -68,13 +67,37 @@ def calculate_water_volume(area_sqm):
     water_volume_tons = water_volume_cubic_m
     return water_volume_tons
 
+def gemini_generate_text(prompt, api_key, model_name):
+    """
+    Gemini API のエンドポイントに対してリクエストを送り、テキスト生成を行う関数
+    """
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+    headers = {"Content-Type": "application/json"}
+    data = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }]
+    }
+    response = requests.post(url, headers=headers, data=json.dumps(data))
+    if response.status_code == 200:
+        result = response.json()
+        # 例: {"candidates": [{"output": "{...}"}]}
+        candidates = result.get("candidates", [])
+        if candidates:
+            generated_text = candidates[0].get("output", "").strip()
+            return generated_text
+        else:
+            st.error("API 応答に候補が含まれていません。")
+            return None
+    else:
+        st.error(f"APIリクエストに失敗しました。ステータスコード: {response.status_code}\n{response.text}")
+        return None
+
 def predict_fire_spread(points, weather, duration_hours, api_key, model_name):
     """
-    Gemini API（google.generativeai）を利用して、火災拡大の予測を行う関数
+    Gemini API を利用して、火災拡大の予測を行う関数
     ※出力はJSON形式で {"radius_m": 値, "area_sqm": 値, "water_volume_tons": 値} を想定
     """
-    # APIキーを設定
-    genai.configure(api_key=api_key)
     points_str = ', '.join([f"({lat}, {lon})" for lat, lon in points])
     prompt = f"""
     以下の条件で火災の炎症範囲を予測してください。
@@ -96,10 +119,11 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name):
         "water_volume_tons": 値
     }}
     """
-    response = genai.generate_text(model=model_name, prompt=prompt, max_output_tokens=150)
-    prediction_text = response.text.strip()
+    generated_text = gemini_generate_text(prompt, api_key, model_name)
+    if generated_text is None:
+        return None
     try:
-        prediction_json = json.loads(prediction_text)
+        prediction_json = json.loads(generated_text)
     except Exception as e:
         st.error("予測結果の解析に失敗しました。APIの応答内容を確認してください。")
         return None
@@ -153,7 +177,7 @@ def run_simulation(duration_hours, time_label):
     st.write(f"拡大面積: {simulation['area_sqm']:.2f} 平方メートル")
     st.write(f"必要な消火水量: {simulation['water_volume_tons']:.2f} トン")
     
-    # シミュレーション結果の領域を表示する新たな地図を作成（初期位置は愛媛県上島町）
+    # シミュレーション結果の領域を表示する新たな地図を作成（初期位置は指定座標）
     m_sim = folium.Map(location=initial_location, zoom_start=12)
     for point in st.session_state.points:
         folium.Marker(location=point, icon=folium.Icon(color='red')).add_to(m_sim)
