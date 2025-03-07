@@ -6,6 +6,7 @@ import geopandas as gpd
 import requests
 import json
 import math
+import re
 
 # ページ設定
 st.set_page_config(page_title="火災拡大シミュレーション", layout="wide")
@@ -57,6 +58,17 @@ st_folium(m, width=700, height=500)
 
 # --- 関数定義 ---
 
+def extract_json(text: str) -> str:
+    """
+    マークダウンのコードブロック（```json ... ```）からJSON部分だけを抽出する関数。
+    抽出に失敗した場合は、元のテキストをそのまま返す。
+    """
+    pattern = r"```json\s*(\{.*?\})\s*```"
+    match = re.search(pattern, text, re.DOTALL)
+    if match:
+        return match.group(1)
+    return text
+
 def get_weather(lat, lon):
     """
     指定した緯度・経度の現在の気象情報を、Open-Meteo APIから取得する関数。
@@ -68,7 +80,6 @@ def get_weather(lat, lon):
         f"hourly=relativehumidity_2m,precipitation&timezone=auto"
     )
     response = requests.get(url)
-    # Open-Meteo API のステータスコードを表示
     st.write("Open-Meteo API ステータスコード:", response.status_code)
     data = response.json()
     current = data.get("current_weather", {})
@@ -93,7 +104,7 @@ def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_
     wind_direction_deg: 0=北, 90=東, 180=南, 270=西（度数）
     radius_m: 半径（メートル）
     """
-    deg_per_meter = 1.0 / 111000.0
+    deg_per_meter = 1.0 / 111000.0  # 簡易換算
     start_angle = wind_direction_deg - 90
     end_angle = wind_direction_deg + 90
     num_steps = 36
@@ -179,8 +190,11 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name):
     if not generated_text:
         st.error("Gemini APIから有効な応答が得られませんでした。")
         return None
+
+    # 余分なマークダウンのコードブロックを除去する
+    extracted_json_text = extract_json(generated_text)
     try:
-        prediction_json = json.loads(generated_text)
+        prediction_json = json.loads(extracted_json_text)
     except Exception as e:
         st.error("予測結果の解析に失敗しました。返されたテキストを確認してください。")
         st.write("返却されたテキスト:")
