@@ -5,6 +5,7 @@ from shapely.geometry import Point
 import geopandas as gpd
 import openai
 import requests
+import json
 
 # ページ設定
 st.set_page_config(page_title="火災拡大シミュレーション", layout="wide")
@@ -17,32 +18,35 @@ MODEL_NAME = "gemini-2.0-flash-001"
 # サイドバー：火災発生地点の入力
 st.sidebar.title("火災発生地点の入力")
 with st.sidebar.form(key='location_form'):
-    lat = st.number_input("緯度", format="%f")
-    lon = st.number_input("経度", format="%f")
+    lat_input = st.number_input("緯度", format="%.6f", value=35.681236)
+    lon_input = st.number_input("経度", format="%.6f", value=139.767125)
     add_point = st.form_submit_button("発生地点を追加")
     if add_point:
         if 'points' not in st.session_state:
             st.session_state.points = []
-        st.session_state.points.append((lat, lon))
-        st.sidebar.success(f"地点 ({lat}, {lon}) を追加しました。")
+        st.session_state.points.append((lat_input, lon_input))
+        st.sidebar.success(f"地点 ({lat_input}, {lon_input}) を追加しました。")
 
 # メインエリア：タイトル
 st.title("火災拡大シミュレーション")
 
-# 地図の表示
+# セッションに発生地点リストが無い場合は初期化
+if 'points' not in st.session_state:
+    st.session_state.points = []
+
+# ベースマップの作成（初期位置は東京）
 m = folium.Map(location=[35.681236, 139.767125], zoom_start=12)
-
-# 発生地点の表示
-if 'points' in st.session_state:
-    for point in st.session_state.points:
-        folium.Marker(location=point, icon=folium.Icon(color='red')).add_to(m)
-
-# 地図を表示
+for point in st.session_state.points:
+    folium.Marker(location=point, icon=folium.Icon(color='red')).add_to(m)
 st_folium(m, width=700, height=500)
 
-# 気象データの取得関数
-def get_weather(lat=35.681236, lng=139.767125):
-    url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lng}&current_weather=true"
+# --- 関数定義 ---
+
+def get_weather(lat, lon):
+    """
+    指定した緯度・経度の現在の気象情報を取得する関数（Open-Meteo APIを利用）
+    """
+    url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true"
     response = requests.get(url)
     data = response.json()
     return {
@@ -50,22 +54,22 @@ def get_weather(lat=35.681236, lng=139.767125):
         'wind_direction': data['current_weather']['winddirection']
     }
 
-# 消火水量の計算関数
 def calculate_water_volume(area_sqm):
-    # 1平方メートルあたり0.5立方メートルの水を必要とする（仮定）
+    """
+    火災拡大面積（平方メートル）に対して、必要な消火水量を計算する（1平方メートルあたり0.5立方メートル）
+    1立方メートル = 1トンとして換算
+    """
     water_volume_cubic_m = area_sqm * 0.5
-    water_volume_tons = water_volume_cubic_m  # 1立方メートル = 1トン
+    water_volume_tons = water_volume_cubic_m
     return water_volume_tons
 
-# 火災拡大予測関数
 def predict_fire_spread(points, weather, duration_hours, api_key, model_name):
-    # OpenAI APIの設定
+    """
+    Gemini API（OpenAI API経由）を利用して、火災拡大の予測を行う関数
+    ※出力はJSON形式で {"radius_m": 値, "area_sqm": 値, "water_volume_tons": 値} を想定
+    """
     openai.api_key = api_key
-
-    # 発生地点の座標を文字列に変換
     points_str = ', '.join([f"({lat}, {lon})" for lat, lon in points])
-
-    # プロンプトの作成
     prompt = f"""
     以下の条件で火災の炎症範囲を予測してください。
 
@@ -86,23 +90,23 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name):
         "water_volume_tons": 値
     }}
     """
-
-    # OpenAI APIを使用して予測を取得
     response = openai.Completion.create(
         engine=model_name,
         prompt=prompt,
         max_tokens=150
     )
+    prediction_text = response.choices[0].text.strip()
+    try:
+        prediction_json = json.loads(prediction_text)
+    except Exception as e:
+        st.error("予測結果の解析に失敗しました。APIの応答内容を確認してください。")
+        return None
 
-    # 応答の解析
-    prediction = response.choices[0].text.strip()
-    prediction_json = eval(prediction)  # 注意：evalの使用はセキュリティ上のリスクがあります。安全な方法で解析してください。
-
-    # 地理的範囲の作成（簡易円形）
+    # 発生地点群の重心を求め、そこを中心に半径分のバッファ（円）を作成
     gdf_points = gpd.GeoSeries([Point(lon, lat) for lat, lon in points], crs="EPSG:4326")
     centroid = gdf_points.unary_union.centroid
-    buffer = centroid.buffer(prediction_json['radius_m'] / 111000)  # 簡易緯度経度変換
-
+    # 1度 ≒111,000mとして、バッファの半径（度）を算出
+    buffer = centroid.buffer(prediction_json['radius_m'] / 111000)
     area_coordinates = [(coord[1], coord[0]) for coord in buffer.exterior.coords]
 
     return {
@@ -112,36 +116,67 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name):
         'area_coordinates': area_coordinates
     }
 
-# 気象データの取得
+# --- UI 操作 ---
+
+# 気象データ取得ボタン
 if st.button("気象データ取得"):
-    if 'points' in st.session_state and len(st.session_state.points) > 0:
-        lat, lon = st.session_state.points[0]  # 最初の地点の気象データを取得
-        weather_data = get_weather(lat, lon)
+    if len(st.session_state.points) > 0:
+        # 1つ目の発生地点を基準に気象情報を取得
+        lat_weather, lon_weather = st.session_state.points[0]
+        weather_data = get_weather(lat_weather, lon_weather)
         st.session_state.weather_data = weather_data
         st.write(f"取得した気象データ: {weather_data}")
     else:
         st.warning("発生地点を追加してください。")
 
-# 消火なしシミュレーションの設定
+# シミュレーション結果表示用の関数
+def run_simulation(duration_hours, time_label):
+    if 'weather_data' not in st.session_state:
+        st.error("気象データが取得されていません。")
+        return
+    if len(st.session_state.points) == 0:
+        st.error("発生地点が設定されていません。")
+        return
+    simulation = predict_fire_spread(
+        points=st.session_state.points,
+        weather=st.session_state.weather_data,
+        duration_hours=duration_hours,
+        api_key=API_KEY,
+        model_name=MODEL_NAME
+    )
+    if simulation is None:
+        return
+    st.write(f"### シミュレーション結果 ({time_label})")
+    st.write(f"拡大範囲の半径: {simulation['radius_m']:.2f} m")
+    st.write(f"拡大面積: {simulation['area_sqm']:.2f} 平方メートル")
+    st.write(f"必要な消火水量: {simulation['water_volume_tons']:.2f} トン")
+    
+    # シミュレーション結果の領域を表示する新たな地図を作成
+    m_sim = folium.Map(location=[35.681236, 139.767125], zoom_start=12)
+    for point in st.session_state.points:
+        folium.Marker(location=point, icon=folium.Icon(color='red')).add_to(m_sim)
+    folium.Polygon(simulation['area_coordinates'], color="red", fill=True, fill_opacity=0.5).add_to(m_sim)
+    st_folium(m_sim, width=700, height=500)
+
 st.write("## 消火活動が行われない場合のシミュレーション")
 
-tab1, tab2, tab3 = st.tabs(["日単位", "週単位", "月単位"])
+# タブによる時間単位の切替
+tab_day, tab_week, tab_month = st.tabs(["日単位", "週単位", "月単位"])
 
-with tab1:
-    days = st.slider("日数を選択", 1, 30, 1)
-    duration_hours = days * 24
-    unit = "日"
+with tab_day:
+    days = st.slider("日数を選択", 1, 30, 1, key="days_slider")
+    if st.button("シミュレーション実行 (日単位)", key="sim_day"):
+        duration = days * 24
+        run_simulation(duration, f"{days} 日後")
 
-with tab2:
-    weeks = st.slider("週数を選択", 1, 52, 1)
-    duration_hours = weeks * 7 * 24
-    unit = "週"
+with tab_week:
+    weeks = st.slider("週数を選択", 1, 52, 1, key="weeks_slider")
+    if st.button("シミュレーション実行 (週単位)", key="sim_week"):
+        duration = weeks * 7 * 24
+        run_simulation(duration, f"{weeks} 週後")
 
-with tab3:
-    months = st.slider("月数を選択", 1, 12, 1)
-    duration_hours = months * 30 * 24
-    unit = "月"
-
-# シミュレーションの
-::contentReference[oaicite:4]{index=4}
- 
+with tab_month:
+    months = st.slider("月数を選択", 1, 12, 1, key="months_slider")
+    if st.button("シミュレーション実行 (月単位)", key="sim_month"):
+        duration = months * 30 * 24
+        run_simulation(duration, f"{months} ヶ月後")
