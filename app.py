@@ -15,6 +15,12 @@ st.set_page_config(page_title="火災拡大シミュレーション", layout="wi
 API_KEY = st.secrets["general"]["api_key"]
 MODEL_NAME = "gemini-2.0-flash-001"  # 使用するモデル名
 
+# セッションステートの初期化
+if 'points' not in st.session_state:
+    st.session_state.points = []
+if 'weather_data' not in st.session_state:
+    st.session_state.weather_data = {}
+
 # サイドバー：発生地点の入力
 st.sidebar.title("火災発生地点の入力")
 with st.sidebar.form(key='location_form'):
@@ -22,8 +28,6 @@ with st.sidebar.form(key='location_form'):
     lon_input = st.number_input("経度", format="%.6f", value=133.204356)
     add_point = st.form_submit_button("発生地点を追加")
     if add_point:
-        if 'points' not in st.session_state:
-            st.session_state.points = []
         st.session_state.points.append((lat_input, lon_input))
         st.sidebar.success(f"地点 ({lat_input}, {lon_input}) を追加しました。")
 
@@ -45,17 +49,12 @@ fuel_type = fuel_options[selected_fuel]
 # メインエリア：タイトル
 st.title("火災拡大シミュレーション（Gemini要約付き）")
 
-# セッションに発生地点リストが無い場合は初期化
-if 'points' not in st.session_state:
-    st.session_state.points = []
-
 # ベースマップの作成（初期位置は指定座標）
 initial_location = [34.257586, 133.204356]
 base_map = folium.Map(location=initial_location, zoom_start=12)
 for point in st.session_state.points:
     folium.Marker(location=point, icon=folium.Icon(color='red')).add_to(base_map)
 st_folium(base_map, width=700, height=500)
-
 
 # --- 関数定義 ---
 
@@ -145,187 +144,6 @@ def gemini_generate_text(prompt, api_key, model_name):
     if response.status_code == 200 and raw_json:
         candidates = raw_json.get("candidates", [])
         if candidates:
-            generated_text = candidates[0].get("output", "").strip()
-            return generated_text, raw_json
-        else:
-            return None, raw_json
-    else:
-        return None, raw_json
-
-def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fuel_type):
-    """
-    Gemini API を利用して火災拡大の予測を行う関数。
-    出力は以下の JSON 形式:
-      {"radius_m": <float>, "area_sqm": <float>, "water_volume_tons": <float>}
-    燃料特性 (fuel_type) もプロンプトに含む。
-    """
-    rep_lat, rep_lon = points[0]
-    wind_speed = weather['windspeed']
-    wind_dir = weather['winddirection']
-
-    slope_info = "10度程度の傾斜"
-    elevation_info = "標高150m程度"
-    vegetation_info = "松林と草地が混在"
-    humidity_info = f"相対湿度 {weather.get('humidity', '不明')}%"
-    precipitation_info = f"{weather.get('precipitation', '不明')} mm/h"
-
-    detailed_prompt = (
-        "あなたは火災拡大シミュレーションの専門家です。以下の条件に基づき、"
-        "火災の拡大予測を数値で出力してください。\n"
-        "条件:\n"
-        f"- 発生地点: 緯度 {rep_lat}, 経度 {rep_lon}\n"
-        f"- 気象条件: 風速 {wind_speed} m/s, 風向 {wind_dir} 度 (0=北,90=東,180=南,270=西), "
-        f"時間経過 {duration_hours} 時間, 温度 {weather.get('temperature', '不明')}°C, 湿度 {humidity_info}, 降水量 {precipitation_info}\n"
-        f"- 地形情報: 傾斜 {slope_info}, 標高 {elevation_info}\n"
-        f"- 植生: {vegetation_info}\n"
-        f"- 燃料特性: {fuel_type}\n"
-        "求める出力（純粋なJSON形式のみ、他のテキストを含むな）:\n"
-        '{"radius_m": <火災拡大半径（m）>, "area_sqm": <拡大面積（m²）>, "water_volume_tons": <消火水量（トン）>}\n'
-        "例:\n"
-        '{"radius_m": 331.45, "area_sqm": 345069.36, "water_volume_tons": 123.45}\n"
-    )
-
-    generated_text, raw_json = gemini_generate_text(detailed_prompt, api_key, model_name)
-    st.write("### Gemini API 生JSON応答")
-    if raw_json:
-        with st.expander("生JSON応答 (折りたたみ)") as exp:
-            st.json(raw_json)
-    else:
-        st.warning("Gemini APIからJSON形式の応答が得られませんでした。")
-
-    if not generated_text:
-        if raw_json:
-            raw_text = json.dumps(raw_json, indent=2, ensure_ascii=False)
-            st.markdown("#### Gemini APIから有効な応答が得られませんでした。返却されたJSON:")
-            st.markdown(f"```json\n{raw_text}\n```")
-        else:
-            st.error("Gemini APIから有効な応答が得られませんでした。")
-        return None
-
-    extracted_text = extract_json(generated_text)
-    try:
-        prediction_json = json.loads(extracted_text)
-    except Exception as e:
-        st.error("予測結果の解析に失敗しました。返されたテキストを確認してください。")
-        st.markdown(f"```json\n{generated_text}\n```")
-        return None
-    return prediction_json
-
-
-# ★★ ここが要約のためのポイント ★★
-def gemini_summarize_data(json_data, api_key, model_name):
-    """
-    先ほどpredict_fire_spreadで得られたJSONを、もう一度Geminiに渡して
-    要約結果（ユーザーが見やすい説明文）を返す関数。
-    """
-
-    # JSONを文字列化してプロンプトに含める
-    json_str = json.dumps(json_data, ensure_ascii=False, indent=2)
-    
-    # ★ トリプルクォートは使わず、文字列連結 + \n の方式に変更してエラーを回避する
-    summary_prompt = (
-        "あなたはデータをわかりやすく説明するアシスタントです。\n"
-        "次のような火災拡大シミュレーション結果のJSONがあります:\n"
-        "```json\n"
-        f"{json_str}\n"
-        "```\n"
-        "このJSONに含まれる「火災拡大半径」「拡大面積」「消火水量」などの数値をわかりやすく説明してください。\n"
-        "一般の方が理解しやすい、短めの日本語文章でお願いします。\n"
-    )
-
-    summary_text, summary_raw_json = gemini_generate_text(summary_prompt, api_key, model_name)
-    return summary_text or "要約が取得できませんでした。"
-
-
-def run_simulation(duration_hours, time_label):
-    if 'weather_data' not in st.session_state:
-        st.error("気象データが取得されていません。")
-        return
-    if len(st.session_state.points) == 0:
-        st.error("発生地点が設定されていません。")
-        return
-
-    # 1. 火災拡大予測を実施（Gemini API呼び出し）
-    prediction_json = predict_fire_spread(
-        points=st.session_state.points,
-        weather=st.session_state.weather_data,
-        duration_hours=duration_hours,
-        api_key=API_KEY,
-        model_name=MODEL_NAME,
-        fuel_type=fuel_type  # 選択した燃料特性を渡す
-    )
-    if prediction_json is None:
-        return
-
-    radius_m = prediction_json.get("radius_m", 0)
-    area_sqm = prediction_json.get("area_sqm", 0)
-    water_volume_tons = prediction_json.get("water_volume_tons", 0)
-
-    # 2. さらに、このprediction_jsonをGeminiへ要約依頼
-    summary_text = gemini_summarize_data(prediction_json, API_KEY, MODEL_NAME)
-
-    st.write(f"### シミュレーション結果 ({time_label})")
-    st.write("#### Geminiによる要約結果")
-    st.info(summary_text)
-
-    # 3. 従来どおり、半径や面積等をテキスト表示
-    st.write(f"**半径**: {radius_m:.2f} m")
-    st.write(f"**面積**: {area_sqm:.2f} m²")
-    st.write(f"**必要放水量**: {water_volume_tons:.2f} トン")
-
-    # 4. 地図上に半円形のポリゴンを描画して可視化
-    lat_center, lon_center = st.session_state.points[0]
-    wind_dir = st.session_state.weather_data["winddirection"]
-
-    coords = create_half_circle_polygon(lat_center, lon_center, radius_m, wind_dir)
-    m_sim = folium.Map(location=[lat_center, lon_center], zoom_start=13)
-    
-    folium.Polygon(
-        locations=coords,
-        color="red",
-        fill=True,
-        fill_opacity=0.4,
-        tooltip=f"半径: {radius_m:.2f} m / 面積: {area_sqm:.2f} m²"
-    ).add_to(m_sim)
-    
-    folium.Marker(
-        location=[lat_center, lon_center],
-        popup=f"半径: {radius_m:.2f} m<br>面積: {area_sqm:.2f} m²"
-    ).add_to(m_sim)
-    
-    for pt in st.session_state.points:
-        folium.Marker(location=pt, icon=folium.Icon(color='red')).add_to(m_sim)
-    st_folium(m_sim, width=700, height=500)
-
-
-# 気象データ取得ボタン
-if st.button("気象データ取得"):
-    if len(st.session_state.points) > 0:
-        lat_weather, lon_weather = st.session_state.points[0]
-        weather_data = get_weather(lat_weather, lon_weather)
-        st.session_state.weather_data = weather_data
-        st.write(f"取得した気象データ: {weather_data}")
-    else:
-        st.warning("発生地点を追加してください。")
-
-st.write("## 消火活動が行われない場合のシミュレーション")
-
-tab_day, tab_week, tab_month = st.tabs(["日単位", "週単位", "月単位"])
-
-with tab_day:
-    days = st.slider("日数を選択", 1, 30, 1, key="days_slider")
-    if st.button("シミュレーション実行 (日単位)", key="sim_day"):
-        duration = days * 24
-        run_simulation(duration, f"{days} 日後")
-
-with tab_week:
-    weeks = st.slider("週数を選択", 1, 52, 1, key="weeks_slider")
-    if st.button("シミュレーション実行 (週単位)", key="sim_week"):
-        duration = weeks * 7 * 24
-        run_simulation(duration, f"{weeks} 週後")
-
-with tab_month:
-    months = st.slider("月数を選択", 1, 12, 1, key="months_slider")
-    if st.button("シミュレーション実行 (月単位)", key="sim_month"):
-        duration = months * 30 * 24
-        run_simulation(duration, f"{months} ヶ月後")
+            generated
+::contentReference[oaicite:0]{index=0}
+ 
