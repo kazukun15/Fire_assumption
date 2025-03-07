@@ -15,13 +15,15 @@ MODEL_NAME = "gemini-2.0-flash-001"
 
 # サイドバー：火災発生地点の入力
 st.sidebar.title("火災発生地点の入力")
-lat = st.sidebar.number_input("緯度", format="%f")
-lon = st.sidebar.number_input("経度", format="%f")
-if st.sidebar.button("発生地点を追加"):
-    if 'points' not in st.session_state:
-        st.session_state.points = []
-    st.session_state.points.append((lat, lon))
-    st.sidebar.success(f"地点 ({lat}, {lon}) を追加しました。")
+with st.sidebar.form(key='location_form'):
+    lat = st.number_input("緯度", format="%f")
+    lon = st.number_input("経度", format="%f")
+    add_point = st.form_submit_button("発生地点を追加")
+    if add_point:
+        if 'points' not in st.session_state:
+            st.session_state.points = []
+        st.session_state.points.append((lat, lon))
+        st.sidebar.success(f"地点 ({lat}, {lon}) を追加しました。")
 
 # メインエリア：タイトル
 st.title("火災拡大シミュレーション")
@@ -69,7 +71,7 @@ with tab3:
 
 # シミュレーションの実行
 if st.button("シミュレーション実行"):
-    if 'weather_data' not in st.session_state or 'points' not in st.session_state or len(st.session_state.points) == 0:
+    if 'weather_data' not in st.session_state or len(st.session_state.points) == 0:
         st.warning("発生地点と気象データが必要です。")
     else:
         prediction = predict_fire_spread(
@@ -79,13 +81,14 @@ if st.button("シミュレーション実行"):
             api_key=API_KEY,
             model_name=MODEL_NAME
         )
-        st.write(f"予測結果（{duration_hours/24} {unit}後）:")
-        st.write(f"拡大範囲の半径: {prediction['radius_m']} m")
-        st.write(f"拡大面積: {prediction['area_sqm']} 平方メートル")
-        st.write(f"必要な消火水量: {prediction['water_volume_tons']} トン")
+        st.write(f"予測結果（{days if unit == '日' else weeks if unit == '週' else months} {unit}後）:")
+        st.write(f"拡大範囲の半径: {prediction['radius_m']:.2f} m")
+        st.write(f"拡大面積: {prediction['area_sqm']:.2f} 平方メートル")
+        st.write(f"必要な消火水量: {prediction['water_volume_tons']:.2f} トン")
 
         # 範囲を地図に表示
         folium.Polygon(prediction['area_coordinates'], color="red", fill=True, fill_opacity=0.5).add_to(m)
 
         # 地図の再表示
         st_folium(m, width=700, height=500)
+
