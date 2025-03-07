@@ -51,17 +51,17 @@ if 'points' not in st.session_state:
 
 # ベースマップの作成（初期位置は指定座標）
 initial_location = [34.257586, 133.204356]
-m = folium.Map(location=initial_location, zoom_start=12)
+base_map = folium.Map(location=initial_location, zoom_start=12)
 for point in st.session_state.points:
-    folium.Marker(location=point, icon=folium.Icon(color='red')).add_to(m)
-st_folium(m, width=700, height=500)
+    folium.Marker(location=point, icon=folium.Icon(color='red')).add_to(base_map)
+st_folium(base_map, width=700, height=500)
 
 # --- 関数定義 ---
 
 def extract_json(text: str) -> str:
     """
     マークダウンのコードブロック（```json ... ```）からJSON部分だけを抽出する関数。
-    抽出に失敗した場合は、元のテキストをそのまま返す。
+    マッチしなければ元のテキストをそのまま返す。
     """
     pattern = r"```json\s*(\{.*?\})\s*```"
     match = re.search(pattern, text, re.DOTALL)
@@ -104,7 +104,7 @@ def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_
     wind_direction_deg: 0=北, 90=東, 180=南, 270=西（度数）
     radius_m: 半径（メートル）
     """
-    deg_per_meter = 1.0 / 111000.0  # 簡易換算
+    deg_per_meter = 1.0 / 111000.0
     start_angle = wind_direction_deg - 90
     end_angle = wind_direction_deg + 90
     num_steps = 36
@@ -184,17 +184,18 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name):
     generated_text, raw_json = gemini_generate_text(detailed_prompt, api_key, model_name)
     st.write("### Gemini API 生JSON応答")
     if raw_json:
-        st.json(raw_json)
+        with st.expander("生JSON応答 (折りたたみ)"):
+            st.json(raw_json)
     else:
         st.warning("Gemini APIからJSON形式の応答が得られませんでした。")
     if not generated_text:
         st.error("Gemini APIから有効な応答が得られませんでした。")
         return None
 
-    # 余分なマークダウンのコードブロックを除去する
-    extracted_json_text = extract_json(generated_text)
+    # マークダウンのコードブロックからJSON部分を抽出
+    extracted_text = extract_json(generated_text)
     try:
-        prediction_json = json.loads(extracted_json_text)
+        prediction_json = json.loads(extracted_text)
     except Exception as e:
         st.error("予測結果の解析に失敗しました。返されたテキストを確認してください。")
         st.write("返却されたテキスト:")
@@ -227,7 +228,7 @@ def run_simulation(duration_hours, time_label):
     st.write(f"### シミュレーション結果 ({time_label})")
     st.write(f"半径: {radius_m:.2f} m")
     st.write(f"面積: {area_sqm:.2f} m²")
-    st.write("#### 消火水量")
+    st.write("#### 必要放水量")
     st.info(f"{water_volume_tons:.2f} トン")
 
     lat_center, lon_center = st.session_state.points[0]
@@ -240,7 +241,7 @@ def run_simulation(duration_hours, time_label):
         color="red",
         fill=True,
         fill_opacity=0.4,
-        tooltip=f"半径: {radius_m:.2f} m / 面積: {area_sqm:.2f} m²"
+        tooltip=f"面積: {area_sqm:.2f} m²"
     ).add_to(m_sim)
     for pt in st.session_state.points:
         folium.Marker(location=pt, icon=folium.Icon(color='red')).add_to(m_sim)
