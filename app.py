@@ -1,9 +1,10 @@
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
-from utils import get_weather, predict_fire_spread, calculate_water_volume
-from shapely.geometry import Point, Polygon
+from shapely.geometry import Point
 import geopandas as gpd
+import openai
+import requests
 
 # ページ設定
 st.set_page_config(page_title="火災拡大シミュレーション", layout="wide")
@@ -39,6 +40,78 @@ if 'points' in st.session_state:
 # 地図を表示
 st_folium(m, width=700, height=500)
 
+# 気象データの取得関数
+def get_weather(lat=35.681236, lng=139.767125):
+    url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lng}&current_weather=true"
+    response = requests.get(url)
+    data = response.json()
+    return {
+        'wind_speed': data['current_weather']['windspeed'],
+        'wind_direction': data['current_weather']['winddirection']
+    }
+
+# 消火水量の計算関数
+def calculate_water_volume(area_sqm):
+    # 1平方メートルあたり0.5立方メートルの水を必要とする（仮定）
+    water_volume_cubic_m = area_sqm * 0.5
+    water_volume_tons = water_volume_cubic_m  # 1立方メートル = 1トン
+    return water_volume_tons
+
+# 火災拡大予測関数
+def predict_fire_spread(points, weather, duration_hours, api_key, model_name):
+    # OpenAI APIの設定
+    openai.api_key = api_key
+
+    # 発生地点の座標を文字列に変換
+    points_str = ', '.join([f"({lat}, {lon})" for lat, lon in points])
+
+    # プロンプトの作成
+    prompt = f"""
+    以下の条件で火災の炎症範囲を予測してください。
+
+    発生地点: {points_str}
+    風速: {weather['wind_speed']} m/s
+    風向: {weather['wind_direction']}度
+    時間経過: {duration_hours} 時間
+
+    以下を算出してください:
+    1. 予測される炎症範囲の半径（メートル）
+    2. 炎症範囲のおおよその面積（平方メートル）
+    3. 必要な消火水量（トン）
+
+    出力はJSON形式で以下のように返してください：
+    {{
+        "radius_m": 値,
+        "area_sqm": 値,
+        "water_volume_tons": 値
+    }}
+    """
+
+    # OpenAI APIを使用して予測を取得
+    response = openai.Completion.create(
+        engine=model_name,
+        prompt=prompt,
+        max_tokens=150
+    )
+
+    # 応答の解析
+    prediction = response.choices[0].text.strip()
+    prediction_json = eval(prediction)  # 注意：evalの使用はセキュリティ上のリスクがあります。安全な方法で解析してください。
+
+    # 地理的範囲の作成（簡易円形）
+    gdf_points = gpd.GeoSeries([Point(lon, lat) for lat, lon in points], crs="EPSG:4326")
+    centroid = gdf_points.unary_union.centroid
+    buffer = centroid.buffer(prediction_json['radius_m'] / 111000)  # 簡易緯度経度変換
+
+    area_coordinates = [(coord[1], coord[0]) for coord in buffer.exterior.coords]
+
+    return {
+        'radius_m': prediction_json['radius_m'],
+        'area_sqm': prediction_json['area_sqm'],
+        'water_volume_tons': prediction_json['water_volume_tons'],
+        'area_coordinates': area_coordinates
+    }
+
 # 気象データの取得
 if st.button("気象データ取得"):
     if 'points' in st.session_state and len(st.session_state.points) > 0:
@@ -69,26 +142,6 @@ with tab3:
     duration_hours = months * 30 * 24
     unit = "月"
 
-# シミュレーションの実行
-if st.button("シミュレーション実行"):
-    if 'weather_data' not in st.session_state or len(st.session_state.points) == 0:
-        st.warning("発生地点と気象データが必要です。")
-    else:
-        prediction = predict_fire_spread(
-            points=st.session_state.points,
-            weather=st.session_state.weather_data,
-            duration_hours=duration_hours,
-            api_key=API_KEY,
-            model_name=MODEL_NAME
-        )
-        st.write(f"予測結果（{days if unit == '日' else weeks if unit == '週' else months} {unit}後）:")
-        st.write(f"拡大範囲の半径: {prediction['radius_m']:.2f} m")
-        st.write(f"拡大面積: {prediction['area_sqm']:.2f} 平方メートル")
-        st.write(f"必要な消火水量: {prediction['water_volume_tons']:.2f} トン")
-
-        # 範囲を地図に表示
-        folium.Polygon(prediction['area_coordinates'], color="red", fill=True, fill_opacity=0.5).add_to(m)
-
-        # 地図の再表示
-        st_folium(m, width=700, height=500)
-
+# シミュレーションの
+::contentReference[oaicite:4]{index=4}
+ 
