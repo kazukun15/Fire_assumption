@@ -1,1 +1,6 @@
-
+streamlit
+requests
+shapely
+geopandas
+folium
+streamlit-folium
