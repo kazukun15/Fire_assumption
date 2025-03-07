@@ -3,9 +3,9 @@ import folium
 from streamlit_folium import st_folium
 from shapely.geometry import Point
 import geopandas as gpd
-import openai
 import requests
 import json
+import google.generativeai as genai  # Gemini API 用ライブラリ
 
 # ページ設定
 st.set_page_config(page_title="火災拡大シミュレーション", layout="wide")
@@ -17,8 +17,8 @@ MODEL_NAME = "gemini-2.0-flash-001"  # 使用するモデル名
 # サイドバー：火災発生地点の入力
 st.sidebar.title("火災発生地点の入力")
 with st.sidebar.form(key='location_form'):
-    lat_input = st.number_input("緯度", format="%.6f", value=35.681236)
-    lon_input = st.number_input("経度", format="%.6f", value=139.767125)
+    lat_input = st.number_input("緯度", format="%.6f", value=33.9500)
+    lon_input = st.number_input("経度", format="%.6f", value=132.7500)
     add_point = st.form_submit_button("発生地点を追加")
     if add_point:
         if 'points' not in st.session_state:
@@ -38,8 +38,9 @@ st.title("火災拡大シミュレーション")
 if 'points' not in st.session_state:
     st.session_state.points = []
 
-# ベースマップの作成（初期位置は東京）
-m = folium.Map(location=[35.681236, 139.767125], zoom_start=12)
+# ベースマップの作成（初期位置は愛媛県上島町）
+initial_location = [33.9500, 132.7500]
+m = folium.Map(location=initial_location, zoom_start=12)
 for point in st.session_state.points:
     folium.Marker(location=point, icon=folium.Icon(color='red')).add_to(m)
 st_folium(m, width=700, height=500)
@@ -69,10 +70,11 @@ def calculate_water_volume(area_sqm):
 
 def predict_fire_spread(points, weather, duration_hours, api_key, model_name):
     """
-    Gemini API（OpenAI API経由）を利用して、火災拡大の予測を行う関数
+    Gemini API（google.generativeai）を利用して、火災拡大の予測を行う関数
     ※出力はJSON形式で {"radius_m": 値, "area_sqm": 値, "water_volume_tons": 値} を想定
     """
-    openai.api_key = api_key
+    # APIキーを設定
+    genai.configure(api_key=api_key)
     points_str = ', '.join([f"({lat}, {lon})" for lat, lon in points])
     prompt = f"""
     以下の条件で火災の炎症範囲を予測してください。
@@ -94,12 +96,8 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name):
         "water_volume_tons": 値
     }}
     """
-    response = openai.Completion.create(
-        engine=model_name,
-        prompt=prompt,
-        max_tokens=150
-    )
-    prediction_text = response.choices[0].text.strip()
+    response = genai.generate_text(model=model_name, prompt=prompt, max_output_tokens=150)
+    prediction_text = response.text.strip()
     try:
         prediction_json = json.loads(prediction_text)
     except Exception as e:
@@ -155,8 +153,8 @@ def run_simulation(duration_hours, time_label):
     st.write(f"拡大面積: {simulation['area_sqm']:.2f} 平方メートル")
     st.write(f"必要な消火水量: {simulation['water_volume_tons']:.2f} トン")
     
-    # シミュレーション結果の領域を表示する新たな地図を作成
-    m_sim = folium.Map(location=[35.681236, 139.767125], zoom_start=12)
+    # シミュレーション結果の領域を表示する新たな地図を作成（初期位置は愛媛県上島町）
+    m_sim = folium.Map(location=initial_location, zoom_start=12)
     for point in st.session_state.points:
         folium.Marker(location=point, icon=folium.Icon(color='red')).add_to(m_sim)
     folium.Polygon(simulation['area_coordinates'], color="red", fill=True, fill_opacity=0.5).add_to(m_sim)
