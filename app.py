@@ -43,7 +43,7 @@ selected_fuel = st.sidebar.selectbox("燃料特性を選択してください", 
 fuel_type = fuel_options[selected_fuel]
 
 # メインエリア：タイトル
-st.title("火災拡大シミュレーション（半円形 + 詳細プロンプト + JSON表示）")
+st.title("火災拡大シミュレーション（半円形表示 + 詳細プロンプト + JSON表示）")
 
 # セッションに発生地点リストが無い場合は初期化
 if 'points' not in st.session_state:
@@ -189,7 +189,6 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name):
     else:
         st.warning("Gemini APIからJSON形式の応答が得られませんでした。")
     if not generated_text:
-        # 有効な応答が得られなかった場合、raw_json の text 部分をマークダウン形式で表示する
         if raw_json:
             raw_text = json.dumps(raw_json, indent=2, ensure_ascii=False)
             st.markdown("#### Gemini APIから有効な応答が得られませんでした。返却されたJSON:")
@@ -198,13 +197,11 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name):
             st.error("Gemini APIから有効な応答が得られませんでした。")
         return None
 
-    # マークダウンコードブロックからJSON部分を抽出
     extracted_text = extract_json(generated_text)
     try:
         prediction_json = json.loads(extracted_text)
     except Exception as e:
         st.error("予測結果の解析に失敗しました。返されたテキストを確認してください。")
-        st.write("返却されたテキスト:")
         st.markdown(f"```json\n{generated_text}\n```")
         return None
     return prediction_json
@@ -242,13 +239,22 @@ def run_simulation(duration_hours, time_label):
 
     coords = create_half_circle_polygon(lat_center, lon_center, radius_m, wind_dir)
     m_sim = folium.Map(location=[lat_center, lon_center], zoom_start=13)
+    
+    # 半円形ポリゴンに半径と面積をツールチップで表示
     folium.Polygon(
         locations=coords,
         color="red",
         fill=True,
         fill_opacity=0.4,
-        tooltip=f"面積: {area_sqm:.2f} m²"
+        tooltip=f"半径: {radius_m:.2f} m / 面積: {area_sqm:.2f} m²"
     ).add_to(m_sim)
+    
+    # 発生地点の中心にポップアップを表示
+    folium.Marker(
+        location=[lat_center, lon_center],
+        popup=f"半径: {radius_m:.2f} m<br>面積: {area_sqm:.2f} m²"
+    ).add_to(m_sim)
+    
     for pt in st.session_state.points:
         folium.Marker(location=pt, icon=folium.Icon(color='red')).add_to(m_sim)
     st_folium(m_sim, width=700, height=500)
