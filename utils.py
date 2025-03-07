@@ -1,3 +1,16 @@
+import requests
+
+def get_weather(lat=35.681236, lng=139.767125):
+    url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lng}&current=wind_speed_10m,wind_direction_10m"
+    response = requests.get(url)
+    data = response.json()
+    return {
+        'wind_speed': data['current']['wind_speed_10m'],
+        'wind_direction': data['current']['wind_direction_10m']
+    }
+
+
+
 import google.generativeai as genai
 from shapely.geometry import Point
 import geopandas as gpd
