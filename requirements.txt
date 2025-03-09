@@ -3,5 +3,4 @@ folium
 streamlit-folium
 shapely
 geopandas
-google-generativeai
 requests
