@@ -1,15 +1,14 @@
 import streamlit as st
-import folium
-from streamlit_folium import st_folium
-from shapely.geometry import Point
-import geopandas as gpd
+import pydeck as pdk
 import requests
 import json
 import math
 import re
+from shapely.geometry import Point, Polygon
+import geopandas as gpd
 
 # ページ設定
-st.set_page_config(page_title="火災拡大シミュレーション", layout="wide")
+st.set_page_config(page_title="火災拡大シミュレーション (pydeck版)", layout="wide")
 
 # グローバル設定（secretsからAPIキーを取得）
 API_KEY = st.secrets["general"]["api_key"]
@@ -47,14 +46,10 @@ selected_fuel = st.sidebar.selectbox("燃料特性を選択してください", 
 fuel_type = fuel_options[selected_fuel]
 
 # メインエリア：タイトル
-st.title("火災拡大シミュレーション（Gemini要約付き）")
+st.title("火災拡大シミュレーション（pydeck アニメーション版）")
 
-# ベースマップの作成（初期位置）
+# 初期位置（仮に指定）
 initial_location = [34.257586, 133.204356]
-base_map = folium.Map(location=initial_location, zoom_start=12)
-for point in st.session_state.points:
-    folium.Marker(location=point, icon=folium.Icon(color='red')).add_to(base_map)
-st_folium(base_map, width=700, height=500)
 
 # --- 関数定義 ---
 
@@ -100,26 +95,26 @@ def get_weather(lat, lon):
 
 def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_deg):
     """
-    風向きの方向を中心とした ±90° の半円形（扇形）Polygon を作成する関数。
-    wind_direction_deg: 0=北, 90=東, 180=南, 270=西（度数）
-    radius_m: 半径（メートル）
+    風向きを考慮した半円形（扇形）のポリゴンを作成する。
+    風向き中心に±90°の角度で生成します。
     """
     deg_per_meter = 1.0 / 111000.0
     start_angle = wind_direction_deg - 90
     end_angle = wind_direction_deg + 90
     num_steps = 36
     coords = []
-    coords.append((center_lat, center_lon))
+    # 中心点
+    coords.append((center_lon, center_lat))  # pydeckは[lon, lat]
     for i in range(num_steps + 1):
         angle_deg = start_angle + (end_angle - start_angle) * i / num_steps
         angle_rad = math.radians(angle_deg)
-        offset_y_m = radius_m * math.cos(angle_rad)
-        offset_x_m = radius_m * math.sin(angle_rad)
-        offset_lat = offset_y_m * deg_per_meter
-        offset_lon = offset_x_m * deg_per_meter
+        offset_y = radius_m * math.cos(angle_rad)
+        offset_x = radius_m * math.sin(angle_rad)
+        offset_lat = offset_y * deg_per_meter
+        offset_lon = offset_x * deg_per_meter
         new_lat = center_lat + offset_lat
         new_lon = center_lon + offset_lon
-        coords.append((new_lat, new_lon))
+        coords.append((new_lon, new_lat))
     return coords
 
 def gemini_generate_text(prompt, api_key, model_name):
@@ -259,25 +254,32 @@ def run_simulation(duration_hours, time_label):
     st.write("#### 必要放水量")
     st.info(f"{water_volume_tons:.2f} トン")
 
+    # アニメーション用のスライダー（0～100%までの延焼進捗）
+    progress = st.slider("延焼進捗 (%)", 0, 100, 100, key="progress_slider")
+    fraction = progress / 100.0  # 進捗に応じた割合
+
+    # 中心地点
     lat_center, lon_center = st.session_state.points[0]
     wind_dir = st.session_state.weather_data["winddirection"]
 
-    coords = create_half_circle_polygon(lat_center, lon_center, radius_m, wind_dir)
-    m_sim = folium.Map(location=[lat_center, lon_center], zoom_start=13)
-    folium.Polygon(
-        locations=coords,
-        color="red",
-        fill=True,
-        fill_opacity=0.4,
-        tooltip=f"半径: {radius_m:.2f} m / 面積: {area_sqm:.2f} m²"
-    ).add_to(m_sim)
-    folium.Marker(
-        location=[lat_center, lon_center],
-        popup=f"半径: {radius_m:.2f} m<br>面積: {area_sqm:.2f} m²"
-    ).add_to(m_sim)
-    for pt in st.session_state.points:
-        folium.Marker(location=pt, icon=folium.Icon(color='red')).add_to(m_sim)
-    st_folium(m_sim, width=700, height=500)
+    # 現在の進捗に応じた半径
+    current_radius = radius_m * fraction
+    coords = create_half_circle_polygon(lat_center, lon_center, current_radius, wind_dir)
+
+    # pydeckでのポリゴン表示用データ作成
+    polygon_layer = pdk.Layer(
+        "PolygonLayer",
+        data=[{"coordinates": [coords]}],
+        get_polygon="coordinates",
+        get_fill_color="[255, 0, 0, 100]",
+        pickable=True,
+        auto_highlight=True,
+    )
+    view_state = pdk.ViewState(
+        latitude=lat_center, longitude=lon_center, zoom=13, pitch=0
+    )
+    deck = pdk.Deck(layers=[polygon_layer], initial_view_state=view_state)
+    st.pydeck_chart(deck)
 
 # 気象データ取得ボタン
 if st.button("気象データ取得"):
