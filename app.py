@@ -14,9 +14,9 @@ import time
 # ページ設定
 st.set_page_config(page_title="火災拡大シミュレーション (pydeck版)", layout="wide")
 
-# APIキーの取得（st.secretsに設定されていなければデフォルト値を使用）
-API_KEY = st.secrets.get("general", {}).get("api_key", "YOUR_API_KEY")
-MODEL_NAME = "gemini-2.0-flash-001"  # 使用するモデル名
+# Gemini設定（st.secretsに正しいAPIキーを設定してください）
+genai.configure(api_key=st.secrets["general"]["api_key"])
+MODEL_NAME = "gemini-2.0-flash-001"
 
 # セッションステートの初期化
 if 'points' not in st.session_state:
@@ -63,8 +63,8 @@ st_folium(base_map, width=700, height=500)
 
 def extract_json(text: str) -> dict:
     """
-    テキストからJSONオブジェクトを抽出する。
-    マークダウン形式のコードブロック内のJSONも抽出する。
+    テキストからJSONオブジェクトを抽出する関数。
+    まず直接 json.loads() を試み、失敗した場合はマークダウン形式のコードブロック内のJSONを抽出する。
     """
     try:
         return json.loads(text)
@@ -163,7 +163,7 @@ def gemini_generate_text(prompt, api_key, model_name):
 def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fuel_type):
     """
     Gemini API を利用して火災拡大予測を行う関数。
-    以下の条件に基づき、純粋なJSON形式のみを出力してください。
+    以下の条件に基づき、絶対に純粋なJSON形式のみを出力してください。
     
     条件:
       - 発生地点: 緯度 {rep_lat}, 経度 {rep_lon}
@@ -173,7 +173,7 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fu
       - 植生: {vegetation_info}
       - 燃料特性: {fuel_type}
     
-    出力形式:
+    出力形式（厳密にこれのみ）:
     {
       "radius_m": <火災拡大半径（m）>,
       "area_sqm": <拡大面積（m²）>,
@@ -187,7 +187,7 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fu
       "water_volume_tons": 475.50
     }
     
-    もしJSON形式が違う場合はエラーを出力してください。
+    もしこの形式と異なる場合は、必ずエラーを出力してください。
     """
     rep_lat, rep_lon = points[0]
     wind_speed = weather['windspeed']
@@ -207,7 +207,7 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fu
         f"- 地形情報: 傾斜 {slope_info}, 標高 {elevation_info}\n"
         f"- 植生: {vegetation_info}\n"
         f"- 燃料特性: {fuel_type}\n"
-        "求める出力（純粋なJSON形式のみ、他のテキストを含むな）:\n"
+        "求める出力（絶対に純粋なJSON形式のみ、他のテキストを含むな）:\n"
         '{"radius_m": <火災拡大半径（m）>, "area_sqm": <拡大面積（m²）>, "water_volume_tons": <消火水量（トン）>}\n'
         "例:\n"
         '{"radius_m": 650.00, "area_sqm": 1327322.89, "water_volume_tons": 475.50}\n'
