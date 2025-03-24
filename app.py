@@ -8,12 +8,12 @@ import math
 import re
 import pydeck as pdk
 import time
-import demjson3 as demjson  # Python3 用の demjson ライブラリ
+import demjson3 as demjson  # Python 3 用の demjson のフォーク
 from shapely.geometry import Point
 import geopandas as gpd
 
 # ページ設定
-st.set_page_config(page_title="火災拡大シミュレーション (2D/3Dレポート版)", layout="wide")
+st.set_page_config(page_title="火災拡大シミュレーション (3D & レポート版)", layout="wide")
 
 # secretsからAPIキーを取得（[general]セクション）
 API_KEY = st.secrets["general"]["api_key"]
@@ -29,7 +29,7 @@ if 'weather_data' not in st.session_state:
     st.session_state.weather_data = {}
 
 # -----------------------------
-# サイドバー：発生地点の入力
+# サイドバー：火災発生地点の入力
 # -----------------------------
 st.sidebar.title("火災発生地点の入力")
 with st.sidebar.form(key='location_form'):
@@ -39,7 +39,6 @@ with st.sidebar.form(key='location_form'):
     if add_point:
         st.session_state.points.append((lat_input, lon_input))
         st.sidebar.success(f"地点 ({lat_input}, {lon_input}) を追加しました。")
-
 if st.sidebar.button("登録地点を消去"):
     st.session_state.points = []
     st.sidebar.info("全ての発生地点を削除しました。")
@@ -57,7 +56,7 @@ selected_fuel = st.sidebar.selectbox("燃料特性を選択してください", 
 fuel_type = fuel_options[selected_fuel]
 
 # -----------------------------
-# メインエリア：タイトルと初期マップ（2D）
+# メインエリア：タイトルと初期マップ (2D 表示)
 # -----------------------------
 st.title("火災拡大シミュレーション（Gemini要約＋2D/3Dレポート表示）")
 initial_location = [34.257586, 133.204356]
@@ -296,4 +295,96 @@ def run_simulation(duration_hours, time_label):
     water_volume_tons = prediction_json.get("water_volume_tons", 0)
 
     st.write(f"### シミュレーション結果 ({time_label})")
-    st.write
+    st.write(f"**半径**: {radius_m:.2f} m")
+    st.write(f"**面積**: {area_sqm:.2f} m²")
+    st.write("#### 必要放水量")
+    st.info(f"{water_volume_tons:.2f} トン")
+
+    summary_text = gemini_summarize_data(prediction_json, API_KEY, MODEL_NAME)
+    st.write("#### Geminiによる要約")
+    st.info(summary_text)
+
+    progress = st.slider("延焼進捗 (%)", 0, 100, 100, key="progress_slider")
+    fraction = progress / 100.0
+    current_radius = radius_m * fraction
+
+    lat_center, lon_center = st.session_state.points[0]
+    wind_dir = st.session_state.weather_data["winddirection"]
+
+    # JSON の radius_m を元に半円形ポリゴンの座標列を生成
+    coords = create_half_circle_polygon(lat_center, lon_center, current_radius, wind_dir)
+
+    # Foliumで延焼範囲を描写
+    folium_map = folium.Map(location=[lat_center, lon_center], zoom_start=13)
+    folium.Marker(location=[lat_center, lon_center], icon=folium.Icon(color="red")).add_to(folium_map)
+    folium.Polygon(locations=coords, color="red", fill=True, fill_opacity=0.5).add_to(folium_map)
+    st.write("#### Folium 地図（延焼範囲）")
+    st_folium(folium_map, width=700, height=500)
+
+    # pydeckによる3Dカラム表示
+    col_data = []
+    scale_factor = 50  # 水量に基づくスケール例
+    for c in coords:
+        col_data.append({
+            "lon": c[0],
+            "lat": c[1],
+            "height": water_volume_tons / scale_factor
+        })
+
+    column_layer = pdk.Layer(
+        "ColumnLayer",
+        data=col_data,
+        get_position='[lon, lat]',
+        get_elevation='height',
+        get_radius=30,
+        elevation_scale=1,
+        get_fill_color='[200, 30, 30, 200]',
+        pickable=True,
+        auto_highlight=True,
+    )
+    view_state = pdk.ViewState(
+        latitude=lat_center,
+        longitude=lon_center,
+        zoom=13,
+        pitch=45
+    )
+    deck = pdk.Deck(layers=[column_layer], initial_view_state=view_state)
+    st.write("#### pydeck 3Dカラム表示")
+    st.pydeck_chart(deck)
+
+# -----------------------------
+# 気象データ取得ボタン
+# -----------------------------
+if st.button("気象データ取得"):
+    if len(st.session_state.points) > 0:
+        lat_weather, lon_weather = st.session_state.points[0]
+        weather_data = get_weather(lat_weather, lon_weather)
+        st.session_state.weather_data = weather_data
+        st.write(f"取得した気象データ: {weather_data}")
+    else:
+        st.warning("発生地点を追加してください。")
+
+st.write("## 消火活動が行われない場合のシミュレーション")
+
+# -----------------------------
+# シミュレーション実行（タブ切替）
+# -----------------------------
+tab_day, tab_week, tab_month = st.tabs(["日単位", "週単位", "月単位"])
+
+with tab_day:
+    days = st.slider("日数を選択", 1, 30, 1, key="days_slider")
+    if st.button("シミュレーション実行 (日単位)", key="sim_day"):
+        duration = days * 24
+        run_simulation(duration, f"{days} 日後")
+
+with tab_week:
+    weeks = st.slider("週数を選択", 1, 52, 1, key="weeks_slider")
+    if st.button("シミュレーション実行 (週単位)", key="sim_week"):
+        duration = weeks * 7 * 24
+        run_simulation(duration, f"{weeks} 週後")
+
+with tab_month:
+    months = st.slider("月数を選択", 1, 12, 1, key="months_slider")
+    if st.button("シミュレーション実行 (月単位)", key="sim_month"):
+        duration = months * 30 * 24
+        run_simulation(duration, f"{months} ヶ月後")
