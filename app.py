@@ -5,7 +5,6 @@ import requests
 import json
 import re
 import demjson3 as demjson
-import math
 
 # --- ページ設定 ---
 st.set_page_config(page_title="火災拡大シミュレーション", layout="wide")
@@ -57,6 +56,8 @@ with st.sidebar:
     lon = st.number_input("経度", value=133.204356)
     fuel_type = st.selectbox("燃料特性", ["森林", "草地", "都市部"])
 
+map_placeholder = st.empty()
+
 if st.button("シミュレーション実行"):
     prompt = (
         f"火災シミュレーションを実施します。\n"
@@ -80,7 +81,8 @@ if st.button("シミュレーション実行"):
         [lat, lon], radius=radius_m, color='orange', fill=True, fill_opacity=0.4
     ).add_to(m)
 
-    st_folium(m, width=700, height=500)
+    with map_placeholder:
+        st_folium(m, width=700, height=500)
 
     st.write(f"半径: {result['radius_m']}m")
     st.write(f"面積: {result['area_sqm']}㎡")
