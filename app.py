@@ -56,15 +56,15 @@ st_folium(base_map, width=700, height=500)
 def extract_json(text: str) -> dict:
     """
     テキストからJSONオブジェクトを抽出する関数。
-    まず直接 json.loads() を試み、失敗した場合はマークダウン形式のコードブロック
-    または最初に現れる { ... } 部分を抽出して解析します。
+    まず直接 json.loads() を試み、失敗した場合は
+    マークダウン形式のコードブロック（```json ... ```）または、
+    最初に現れる { ... } 部分を抽出して解析を試みます。
     """
     text = text.strip()
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-    # マークダウン形式のコードブロックから抽出
     pattern_md = r"```json\s*(\{[\s\S]*?\})\s*```"
     match = re.search(pattern_md, text)
     if match:
@@ -77,7 +77,6 @@ def extract_json(text: str) -> dict:
             except Exception as e:
                 st.error(f"demjsonによるJSON解析に失敗しました: {e}")
                 return {}
-    # それ以外の場合、最初に現れる { ... } 部分を抽出
     pattern = r"\{[\s\S]*\}"
     match = re.search(pattern, text)
     if match:
@@ -128,7 +127,10 @@ def gemini_generate_text(prompt, api_key, model_name):
     """
     Gemini API にリクエストを送り、テキスト生成を行う関数。
     生のJSON応答も返します。
+    送信前にプロンプト内容を表示（デバッグ用）。
     """
+    st.write("【Gemini送信プロンプト】")
+    st.code(prompt, language="text")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
     data = {"contents": [{"parts": [{"text": prompt}]}]}
@@ -256,7 +258,6 @@ def gemini_summarize_data(json_data, api_key, model_name):
     summary_text = gemini_generate_text(summary_prompt, API_KEY, model_name)
     return summary_text or "要約が取得できませんでした。"
 
-# --- 追加機能：JSONを再度Geminiに送って地図描写用の形式に変換する ---
 def convert_json_for_map(original_json, center_lat, center_lon):
     """
     取得したJSON（例: "radius_m", "area_sqm", "water_volume_tons"）を元に、
@@ -358,7 +359,7 @@ def run_simulation(duration_hours, time_label):
         get_elevation='height',
         get_radius=30,
         elevation_scale=1,
-        get_fill_color='[200, 30, 30, 100]',  # アルファ値 100 で透明度を上げる
+        get_fill_color='[200, 30, 30, 100]',  # アルファ値100で透明度を上げる
         pickable=True,
         auto_highlight=True,
     )
