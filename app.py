@@ -57,14 +57,13 @@ def extract_json(text: str) -> dict:
     """
     テキストからJSONオブジェクトを抽出する関数。
     まず直接 json.loads() を試み、失敗した場合はマークダウン形式のコードブロック
-    または最初に現れる { ... } 部分を抽出して解析を試みます。
+    または最初に現れる { ... } 部分を抽出して解析します。
     """
     text = text.strip()
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-    # マークダウン形式のコードブロックから抽出
     pattern_md = r"```json\s*(\{[\s\S]*?\})\s*```"
     match = re.search(pattern_md, text)
     if match:
@@ -77,7 +76,6 @@ def extract_json(text: str) -> dict:
             except Exception as e:
                 st.error(f"demjsonによるJSON解析に失敗しました: {e}")
                 return {}
-    # それ以外の場合、最初に現れる { ... } 部分を抽出
     pattern = r"\{[\s\S]*\}"
     match = re.search(pattern, text)
     if match:
@@ -263,7 +261,7 @@ def convert_json_for_map(original_json, center_lat, center_lon):
     中心点 (center_lat, center_lon) をもとに円形の境界の座標リストを生成するJSON形式に変換するため、Gemini API に送信します。
     
     出力形式の例:
-    {"coordinates": [[34.2576, 133.2044], [34.2580, 133.2050], ...]}
+    {"coordinates": [[緯度, 経度], [緯度, 経度], ...]}
     他のテキストは一切含まないこと。
     入力JSON:
     {original_json}
@@ -273,10 +271,11 @@ def convert_json_for_map(original_json, center_lat, center_lon):
         f"{center_lat}, {center_lon}) を中心とした円形の境界を表す座標リストを生成してください。\n"
         "出力は必ず以下の形式にしてください。\n"
         '{"coordinates": [[緯度, 経度], [緯度, 経度], ...]}\n'
-        "他のテキストは一切含まないこと。\n"
+        "他のテキストは一切含まないこと。\n'
         "入力JSON:\n" + json.dumps(original_json)
     )
-    converted_text, raw = gemini_generate_text(prompt, API_KEY, MODEL_NAME)
+    with st.spinner("座標変換中..."):
+        converted_text, raw = gemini_generate_text(prompt, API_KEY, MODEL_NAME)
     if not converted_text:
         st.error("座標変換用のGemini API応答が得られませんでした。")
         return None
@@ -323,11 +322,11 @@ def run_simulation(duration_hours, time_label):
     wind_dir = st.session_state.weather_data.get("winddirection", 0)
     
     # JSON を再度 Gemini に送り、地図描写用の形式に変換する
-    converted = convert_json_for_map(result, lat_center, lon_center)
+    with st.spinner("座標変換中..."):
+        converted = convert_json_for_map(result, lat_center, lon_center)
     if converted and "coordinates" in converted:
         coords = converted["coordinates"]
     else:
-        # 変換結果が得られなければ従来の方法で座標列を生成
         coords = create_half_circle_polygon(lat_center, lon_center, current_radius, wind_dir)
     
     # Folium 2D 地図描写
@@ -357,7 +356,7 @@ def run_simulation(duration_hours, time_label):
         get_elevation='height',
         get_radius=30,
         elevation_scale=1,
-        get_fill_color='[200, 30, 30, 100]',  # アルファ値を100で透明度を上げる
+        get_fill_color='[200, 30, 30, 100]',  # アルファ値 100 で透明度を上げる
         pickable=True,
         auto_highlight=True,
     )
