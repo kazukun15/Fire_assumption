@@ -56,8 +56,8 @@ st_folium(base_map, width=700, height=500)
 def extract_json(text: str) -> dict:
     """
     テキストからJSONオブジェクトを抽出する関数。
-    直接 json.loads() を試み、失敗した場合は、マークダウン形式のコードブロック
-    または最初に現れる { ... } 部分を抽出して解析します。
+    まず直接 json.loads() を試み、失敗した場合はマークダウン形式のコードブロック
+    または最初に現れる { ... } 部分を抽出して解析を試みます。
     """
     text = text.strip()
     try:
@@ -175,7 +175,7 @@ def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_
 def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fuel_type):
     """
     Gemini API を利用して火災拡大予測を行う関数です。
-    以下の条件に基づいて、純粋なJSON形式のみを出力してください。
+    以下の条件に基づき、純粋なJSON形式のみを出力してください。
     
     【条件】
     ・発生地点: 緯度 {rep_lat}, 経度 {rep_lon}
@@ -256,25 +256,26 @@ def gemini_summarize_data(json_data, api_key, model_name):
     summary_text = gemini_generate_text(summary_prompt, API_KEY, model_name)
     return summary_text or "要約が取得できませんでした。"
 
-# 追加機能：JSONを再度Geminiに送って、地図描写用の座標形式に変換する
+# --- 追加機能：JSONを再度Geminiに送って地図描写用の形式に変換する ---
 def convert_json_for_map(original_json, center_lat, center_lon):
     """
-    取得したJSON（例："radius_m", "area_sqm", "water_volume_tons"）を
-    地図描写に適した形式に変換するために、Gemini API に送信する。
-    ここでは、中心点 (center_lat, center_lon) をもとに、円形の境界の座標リストを生成するJSONを出力するよう求める。
+    取得したJSON（例: "radius_m", "area_sqm", "water_volume_tons"）を元に、
+    中心点 (center_lat, center_lon) をもとに円形の境界の座標リストを生成するJSON形式に変換するため、Gemini API に送信します。
     
-    出力例:
+    出力形式の例:
     {"coordinates": [[34.2576, 133.2044], [34.2580, 133.2050], ...]}
+    他のテキストは一切含まないこと。
+    入力JSON:
+    {original_json}
     """
     prompt = (
         "以下のJSONは火災拡大の予測結果です。これを元に、中心点 ("
         f"{center_lat}, {center_lon}) を中心とした円形の境界を表す座標リストを生成してください。\n"
         "出力は必ず以下の形式にしてください。\n"
         '{"coordinates": [[緯度, 経度], [緯度, 経度], ...]}\n'
-        "他のテキストは一切含まないこと。\n'
+        "他のテキストは一切含まないこと。\n"
         "入力JSON:\n" + json.dumps(original_json)
     )
-    # Gemini APIに送信して変換結果を取得
     converted_text, raw = gemini_generate_text(prompt, API_KEY, MODEL_NAME)
     if not converted_text:
         st.error("座標変換用のGemini API応答が得られませんでした。")
@@ -314,7 +315,6 @@ def run_simulation(duration_hours, time_label):
     st.write("#### Geminiによる要約")
     st.info(summary_text)
     
-    # 延焼進捗スライダー
     progress = st.slider("延焼進捗 (%)", 0, 100, 100, key="progress_slider")
     fraction = progress / 100.0
     current_radius = radius_m * fraction
@@ -322,12 +322,12 @@ def run_simulation(duration_hours, time_label):
     lat_center, lon_center = st.session_state.points[0]
     wind_dir = st.session_state.weather_data.get("winddirection", 0)
     
-    # まず、Gemini API から得たJSONを再度Geminiに送って地図描写用の形式に変換
+    # JSON を再度 Gemini に送り、地図描写用の形式に変換する
     converted = convert_json_for_map(result, lat_center, lon_center)
     if converted and "coordinates" in converted:
         coords = converted["coordinates"]
     else:
-        # 変換結果が得られなかった場合は、元の方式で座標列を生成
+        # 変換結果が得られなければ従来の方法で座標列を生成
         coords = create_half_circle_polygon(lat_center, lon_center, current_radius, wind_dir)
     
     # Folium 2D 地図描写
@@ -339,7 +339,7 @@ def run_simulation(duration_hours, time_label):
     
     # pydeck 3D カラム表示
     col_data = []
-    scale_factor = 50  # 水量に基づくスケール例
+    scale_factor = 50  # 放水量に基づくスケール例
     try:
         water_val = float(water_volume_tons)
     except:
@@ -357,7 +357,7 @@ def run_simulation(duration_hours, time_label):
         get_elevation='height',
         get_radius=30,
         elevation_scale=1,
-        get_fill_color='[200, 30, 30, 100]',  # アルファ値を100にして透明度を高める
+        get_fill_color='[200, 30, 30, 100]',  # アルファ値を100で透明度を上げる
         pickable=True,
         auto_highlight=True,
     )
