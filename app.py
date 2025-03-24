@@ -4,12 +4,15 @@ from streamlit_folium import st_folium
 import google.generativeai as genai
 import requests
 import json
+import math
 import re
 import pydeck as pdk
-import demjson
 from shapely.geometry import Point
 import geopandas as gpd
 import time
+
+# ここを修正：demjson -> demjson3
+import demjson3 as demjson
 
 # ページ設定
 st.set_page_config(page_title="火災拡大シミュレーション (3Dカラム版)", layout="wide")
