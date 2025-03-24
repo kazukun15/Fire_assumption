@@ -144,7 +144,8 @@ def gemini_generate_text(prompt, api_key, model_name):
     if response.status_code == 200 and raw_json:
         candidates = raw_json.get("candidates", [])
         if candidates:
-            generated_text = candidates[0].get("output", "").strip()
+            # 修正：content -> parts の中の text を取得
+            generated_text = candidates[0].get("content", {}).get("parts", [])[0].get("text", "").strip()
             return generated_text, raw_json
         else:
             return None, raw_json
