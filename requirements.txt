@@ -6,4 +6,4 @@ requests
 pydeck
 geopandas
 shapely
-demjson
+demjson3
