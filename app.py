@@ -92,12 +92,9 @@ def extract_json(text: str) -> dict:
     st.error("有効なJSON文字列が見つかりませんでした。")
     return {}
 
+# キャッシュ設定は必要に応じて調整。気象データはキャッシュOK。
 @st.cache_data(show_spinner=False)
 def get_weather(lat, lon):
-    """
-    Open-Meteo APIから指定緯度・経度の気象情報を取得する関数。
-    温度、風速、風向、湿度、降水量などの情報を返します。
-    """
     url = (
         f"https://api.open-meteo.com/v1/forecast?"
         f"latitude={lat}&longitude={lon}&current_weather=true&"
@@ -122,13 +119,8 @@ def get_weather(lat, lon):
             result["precipitation"] = data["hourly"].get("precipitation", [])[idx]
     return result
 
-@st.cache_data(show_spinner=False)
+# キャッシュを一時解除（デバッグのため毎回新たに取得）
 def gemini_generate_text(prompt, api_key, model_name):
-    """
-    Gemini API にリクエストを送り、テキスト生成を行う関数。
-    生のJSON応答も返します。
-    送信前にプロンプト内容を表示（デバッグ用）。
-    """
     st.write("【Gemini送信プロンプト】")
     st.code(prompt, language="text")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
@@ -144,7 +136,7 @@ def gemini_generate_text(prompt, api_key, model_name):
     if response.status_code == 200 and raw_json:
         candidates = raw_json.get("candidates", [])
         if candidates:
-            # Gemini の応答例に合わせ、"content" -> "parts" の最初の要素の "text" を取得
+            # 応答例に合わせ、"content" の "parts" 配列から取得
             generated_text = candidates[0].get("content", {}).get("parts", [])[0].get("text", "").strip()
             return generated_text, raw_json
         else:
@@ -153,10 +145,6 @@ def gemini_generate_text(prompt, api_key, model_name):
         return None, raw_json
 
 def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_deg):
-    """
-    風向きを考慮した半円形（扇形）の座標列を生成する関数。
-    pydeck 用に [lon, lat] 形式で返します。
-    """
     deg_per_meter = 1.0 / 111000.0
     start_angle = wind_direction_deg - 90
     end_angle = wind_direction_deg + 90
@@ -176,26 +164,6 @@ def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_
     return coords
 
 def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fuel_type):
-    """
-    Gemini API を利用して火災拡大予測を行う関数です。
-    以下の条件に基づき、純粋なJSON形式のみを出力してください。
-    
-    【条件】
-    ・発生地点: 緯度 {rep_lat}, 経度 {rep_lon}
-    ・気象条件: 温度 {temperature}°C, 風速 {wind_speed} m/s, 風向 {wind_dir} 度,
-      湿度 {humidity_info}, 降水量 {precipitation_info}
-    ・地形情報: 傾斜 {slope_info}, 標高 {elevation_info}
-    ・植生: {vegetation_info}
-    ・燃料特性: {fuel_type}
-    
-    【求める出力】
-    絶対に純粋なJSON形式のみを出力してください（他のテキストを含むな）。
-    出力形式:
-    {"radius_m": 数値, "area_sqm": 数値, "water_volume_tons": 数値}
-    例:
-    {"radius_m": 650.00, "area_sqm": 1327322.89, "water_volume_tons": 475.50}
-    もしこの形式と異なる場合は、必ずエラーを出力してください。
-    """
     rep_lat, rep_lon = points[0]
     wind_speed = weather['windspeed']
     wind_dir = weather['winddirection']
@@ -333,18 +301,16 @@ def run_simulation(duration_hours, time_label):
     else:
         coords = create_half_circle_polygon(lat_center, lon_center, current_radius, wind_dir)
     
-    # 2D/3D 切替用ボタン（ラジオボタン）
+    # 2D 表示/3D 表示の切り替え
     map_mode = st.radio("表示モード", ("2D", "3D"), key="map_mode")
     
     if map_mode == "2D":
-        # Folium 2D 地図描写
         folium_map = folium.Map(location=[lat_center, lon_center], zoom_start=13)
         folium.Marker(location=[lat_center, lon_center], popup="火災発生地点", icon=folium.Icon(color="red")).add_to(folium_map)
         folium.Polygon(locations=coords, color="red", fill=True, fill_opacity=0.5).add_to(folium_map)
         st.write("#### Folium 地図（延焼範囲）")
         st_folium(folium_map, width=700, height=500)
     else:
-        # pydeck 3D カラム表示
         col_data = []
         scale_factor = 50  # 放水量に基づくスケール例
         try:
