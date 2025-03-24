@@ -64,6 +64,7 @@ def extract_json(text: str) -> dict:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
+    # マークダウン形式のコードブロックから抽出
     pattern_md = r"```json\s*(\{[\s\S]*?\})\s*```"
     match = re.search(pattern_md, text)
     if match:
@@ -76,6 +77,7 @@ def extract_json(text: str) -> dict:
             except Exception as e:
                 st.error(f"demjsonによるJSON解析に失敗しました: {e}")
                 return {}
+    # それ以外の場合、最初に現れる { ... } 部分を抽出
     pattern = r"\{[\s\S]*\}"
     match = re.search(pattern, text)
     if match:
@@ -271,7 +273,7 @@ def convert_json_for_map(original_json, center_lat, center_lon):
         f"{center_lat}, {center_lon}) を中心とした円形の境界を表す座標リストを生成してください。\n"
         "出力は必ず以下の形式にしてください。\n"
         '{"coordinates": [[緯度, 経度], [緯度, 経度], ...]}\n'
-        "他のテキストは一切含まないこと。\n'
+        "他のテキストは一切含まないこと。\n"
         "入力JSON:\n" + json.dumps(original_json)
     )
     with st.spinner("座標変換中..."):
