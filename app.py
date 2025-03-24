@@ -8,6 +8,7 @@ import json
 import math
 import re
 import pydeck as pdk
+import time
 
 # ページ設定
 st.set_page_config(page_title="火災拡大シミュレーション (pydeck版)", layout="wide")
@@ -59,20 +60,15 @@ st_folium(base_map, width=700, height=500)
 
 # --- 関数定義 ---
 
-def extract_json(text: str) -> str:
+def extract_json(text: str) -> dict:
     """
-    マークダウン形式のコードブロック（```json ... ```）から、純粋なJSON部分のみを抽出する。
-    マッチしなければ、最初に見つかったJSONオブジェクトを返す。
+    テキストからJSONオブジェクトを抽出する。
     """
-    pattern_md = r"```json\s*(\{.*?\})\s*```"
-    match_md = re.search(pattern_md, text, re.DOTALL)
-    if match_md:
-        return match_md.group(1)
-    pattern = r"(\{.*\})"
-    match = re.search(pattern, text, re.DOTALL)
-    if match:
-        return match.group(1)
-    return text
+    try:
+        json_obj = json.loads(text)
+        return json_obj
+    except json.JSONDecodeError:
+        return {}
 
 def get_weather(lat, lon):
     """
@@ -218,21 +214,15 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fu
         st.warning("Gemini APIからJSON形式の応答が得られませんでした。")
 
     if not generated_text:
-        if raw_json:
-            raw_text = json.dumps(raw_json, indent=2, ensure_ascii=False)
-            st.markdown("#### Gemini APIから有効な応答が得られませんでした。返却されたJSON:")
-            st.markdown(f"```json\n{raw_text}\n```")
-        else:
-            st.error("Gemini APIから有効な応答が得られませんでした。")
+        st.error("Gemini APIから有効な応答が得られませんでした。")
         return None
 
-    extracted_text = extract_json(generated_text)
-    try:
-        prediction_json = json.loads(extracted_text)
-    except Exception as e:
+    prediction_json = extract_json(generated_text)
+    if not prediction_json:
         st.error("予測結果の解析に失敗しました。返されたテキストを確認してください。")
-        st.markdown(f"```json\n{generated_text}\n```")
+        st.markdown(f"`json\n{generated_text}\n`")
         return None
+
     return prediction_json
 
 def gemini_summarize_data(json_data, api_key, model_name):
@@ -286,7 +276,7 @@ def run_simulation(duration_hours, time_label):
     st.write("#### 必要放水量")
     st.info(f"{water_volume_tons:.2f} トン")
 
-    # アニメーション用スライダー（0～100%の延焼進捗）
+    # アニメーション用のスライダー（0～100%の延焼進捗）
     progress = st.slider("延焼進捗 (%)", 0, 100, 100, key="progress_slider")
     fraction = progress / 100.0
     current_radius = radius_m * fraction
