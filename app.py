@@ -144,7 +144,7 @@ def gemini_generate_text(prompt, api_key, model_name):
     if response.status_code == 200 and raw_json:
         candidates = raw_json.get("candidates", [])
         if candidates:
-            # 修正：content -> parts の中の text を取得
+            # Gemini の応答例に合わせ、"content" -> "parts" の最初の要素の "text" を取得
             generated_text = candidates[0].get("content", {}).get("parts", [])[0].get("text", "").strip()
             return generated_text, raw_json
         else:
@@ -333,46 +333,50 @@ def run_simulation(duration_hours, time_label):
     else:
         coords = create_half_circle_polygon(lat_center, lon_center, current_radius, wind_dir)
     
-    # Folium 2D 地図描写
-    folium_map = folium.Map(location=[lat_center, lon_center], zoom_start=13)
-    folium.Marker(location=[lat_center, lon_center], popup="火災発生地点", icon=folium.Icon(color="red")).add_to(folium_map)
-    folium.Polygon(locations=coords, color="red", fill=True, fill_opacity=0.5).add_to(folium_map)
-    st.write("#### Folium 地図（延焼範囲）")
-    st_folium(folium_map, width=700, height=500)
+    # 2D/3D 切替用ボタン（ラジオボタン）
+    map_mode = st.radio("表示モード", ("2D", "3D"), key="map_mode")
     
-    # pydeck 3D カラム表示
-    col_data = []
-    scale_factor = 50  # 放水量に基づくスケール例
-    try:
-        water_val = float(water_volume_tons)
-    except:
-        water_val = 100
-    for c in coords:
-        col_data.append({
-            "lon": c[0],
-            "lat": c[1],
-            "height": water_val / scale_factor
-        })
-    column_layer = pdk.Layer(
-        "ColumnLayer",
-        data=col_data,
-        get_position='[lon, lat]',
-        get_elevation='height',
-        get_radius=30,
-        elevation_scale=1,
-        get_fill_color='[200, 30, 30, 100]',  # アルファ値100で透明度を上げる
-        pickable=True,
-        auto_highlight=True,
-    )
-    view_state = pdk.ViewState(
-        latitude=lat_center,
-        longitude=lon_center,
-        zoom=13,
-        pitch=45
-    )
-    deck = pdk.Deck(layers=[column_layer], initial_view_state=view_state)
-    st.write("#### pydeck 3Dカラム表示")
-    st.pydeck_chart(deck)
+    if map_mode == "2D":
+        # Folium 2D 地図描写
+        folium_map = folium.Map(location=[lat_center, lon_center], zoom_start=13)
+        folium.Marker(location=[lat_center, lon_center], popup="火災発生地点", icon=folium.Icon(color="red")).add_to(folium_map)
+        folium.Polygon(locations=coords, color="red", fill=True, fill_opacity=0.5).add_to(folium_map)
+        st.write("#### Folium 地図（延焼範囲）")
+        st_folium(folium_map, width=700, height=500)
+    else:
+        # pydeck 3D カラム表示
+        col_data = []
+        scale_factor = 50  # 放水量に基づくスケール例
+        try:
+            water_val = float(water_volume_tons)
+        except:
+            water_val = 100
+        for c in coords:
+            col_data.append({
+                "lon": c[0],
+                "lat": c[1],
+                "height": water_val / scale_factor
+            })
+        column_layer = pdk.Layer(
+            "ColumnLayer",
+            data=col_data,
+            get_position='[lon, lat]',
+            get_elevation='height',
+            get_radius=30,
+            elevation_scale=1,
+            get_fill_color='[200, 30, 30, 100]',  # アルファ値100で透明度を上げる
+            pickable=True,
+            auto_highlight=True,
+        )
+        view_state = pdk.ViewState(
+            latitude=lat_center,
+            longitude=lon_center,
+            zoom=13,
+            pitch=45
+        )
+        deck = pdk.Deck(layers=[column_layer], initial_view_state=view_state)
+        st.write("#### pydeck 3Dカラム表示")
+        st.pydeck_chart(deck)
 
 # -----------------------------
 # 気象データ取得ボタン
