@@ -14,12 +14,9 @@ import time
 # ページ設定
 st.set_page_config(page_title="火災拡大シミュレーション (pydeck版)", layout="wide")
 
-# APIキーの取得（st.secretsに正しいAPIキーが設定されていなければデフォルト値を使用）
-API_KEY = st.secrets.get("general", {}).get("api_key", "YOUR_API_KEY")
+# Gemini設定（st.secretsに正しいAPIキーを設定してください）
+genai.configure(api_key=st.secrets["general"]["api_key"])
 MODEL_NAME = "gemini-2.0-flash-001"
-
-# Gemini設定
-genai.configure(api_key=API_KEY)
 
 # セッションステートの初期化
 if 'points' not in st.session_state:
@@ -27,7 +24,7 @@ if 'points' not in st.session_state:
 if 'weather_data' not in st.session_state:
     st.session_state.weather_data = {}
 
-# サイドバー：発生地点の入力
+# サイドバー：発生地点の入力（地図クリックでも追加可能）
 st.sidebar.title("火災発生地点の入力")
 with st.sidebar.form(key='location_form'):
     lat_input = st.number_input("緯度", format="%.6f", value=34.257586)
@@ -55,7 +52,7 @@ fuel_type = fuel_options[selected_fuel]
 # メインエリア：タイトル
 st.title("火災拡大シミュレーション（Gemini要約＋pydeckアニメーション版）")
 
-# ベースマップの作成（初期位置）
+# 初期位置でベースマップ作成
 initial_location = [34.257586, 133.204356]
 base_map = folium.Map(location=initial_location, zoom_start=12)
 for point in st.session_state.points:
@@ -67,7 +64,7 @@ st_folium(base_map, width=700, height=500)
 def extract_json(text: str) -> dict:
     """
     テキストからJSONオブジェクトを抽出する関数。
-    直接 json.loads() を試み、失敗した場合はマークダウン形式のコードブロック内のJSONを抽出する。
+    まず直接 json.loads() を試み、失敗した場合はマークダウン形式のコードブロック内のJSONを抽出する。
     """
     try:
         return json.loads(text)
@@ -176,7 +173,7 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fu
       - 植生: {vegetation_info}
       - 燃料特性: {fuel_type}
     
-    出力形式:
+    出力形式（厳密にこれのみ）:
     {
       "radius_m": <火災拡大半径（m）>,
       "area_sqm": <拡大面積（m²）>,
