@@ -10,18 +10,16 @@ import pydeck as pdk
 from shapely.geometry import Point
 import geopandas as gpd
 import time
-
-# demjson3を利用（Python3用のdemjsonフォーク）
 import demjson3 as demjson
 
 # ページ設定
 st.set_page_config(page_title="火災拡大シミュレーション (3Dカラム版)", layout="wide")
 
-# secretsからAPIキーを取得（[general]セクション）
+# secretsからAPIキーを取得
 API_KEY = st.secrets["general"]["api_key"]
 MODEL_NAME = "gemini-2.0-flash-001"
 
-# Gemini APIの初期設定
+# Gemini API の設定
 genai.configure(api_key=API_KEY)
 
 # セッションステートの初期化
@@ -74,13 +72,12 @@ st_folium(base_map, width=700, height=500)
 def extract_json(text: str) -> dict:
     """
     テキストからJSONオブジェクトを抽出する（多様なパターンに対応）。
-    まず直接 json.loads() を試み、失敗した場合はdemjson3を使って解析を試みる。
+    直接 json.loads() を試み、失敗した場合はdemjson3を使って解析を試みる。
     """
     text = text.strip()
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        # 正規表現でJSON部分を抽出
         pattern = r"\{.*\}"
         match = re.search(pattern, text, re.DOTALL)
         if match:
@@ -151,7 +148,7 @@ def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_
 
 def gemini_generate_text(prompt, api_key, model_name):
     """
-    Gemini API にリクエストを送り、テキスト生成を行う。
+    Gemini API のエンドポイントにリクエストを送り、テキスト生成を行う関数。
     生のJSON応答も返す。
     """
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
@@ -181,7 +178,7 @@ def gemini_generate_text(prompt, api_key, model_name):
 def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fuel_type):
     """
     Gemini API を利用して火災拡大予測を行う関数。
-    以下の条件に基づき、絶対に純粋なJSON形式のみを出力してください。
+    最新の気象データに基づき、以下の条件でシミュレーションを実施します。
     
     条件:
       - 発生地点: 緯度 {rep_lat}, 経度 {rep_lon}
@@ -218,13 +215,14 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fu
     vegetation_info = "松林と草地が混在"
 
     detailed_prompt = (
-        "あなたは火災拡大シミュレーションの専門家です。以下の条件に基づき、火災の拡大予測を数値で出力してください。\n"
-        f"- 発生地点: 緯度 {rep_lat}, 経度 {rep_lon}\n"
-        f"- 気象条件: 風速 {wind_speed} m/s, 風向 {wind_dir} 度, 時間経過 {duration_hours} 時間, 温度 {temperature}°C, "
-        f"湿度 {humidity_info}, 降水量 {precipitation_info}\n"
-        f"- 地形情報: 傾斜 {slope_info}, 標高 {elevation_info}\n"
-        f"- 植生: {vegetation_info}\n"
-        f"- 燃料特性: {fuel_type}\n"
+        "以下の最新気象データに基づき、火災拡大シミュレーションを実施してください。\n"
+        f"【気象データ】\n"
+        f"温度: {temperature}°C, 風速: {wind_speed} m/s, 風向: {wind_dir} 度, 湿度: {humidity_info}, 降水量: {precipitation_info}\n"
+        f"【その他条件】\n"
+        f"発生地点: 緯度 {rep_lat}, 経度 {rep_lon}\n"
+        f"地形情報: 傾斜 {slope_info}, 標高 {elevation_info}\n"
+        f"植生: {vegetation_info}\n"
+        f"燃料特性: {fuel_type}\n"
         "求める出力（絶対に純粋なJSON形式のみ、他のテキストを含むな）:\n"
         '{"radius_m": <火災拡大半径（m）>, "area_sqm": <拡大面積（m²）>, "water_volume_tons": <消火水量（トン）>}\n'
         "例:\n"
@@ -293,15 +291,16 @@ def run_simulation(duration_hours, time_label):
     area_sqm = prediction_json.get("area_sqm", 0)
     water_volume_tons = prediction_json.get("water_volume_tons", 0)
 
-    # 要約取得
-    summary_text = gemini_summarize_data(prediction_json, API_KEY, MODEL_NAME)
-
+    # 結果表示
     st.write(f"### シミュレーション結果 ({time_label})")
     st.write(f"**半径**: {radius_m:.2f} m")
     st.write(f"**面積**: {area_sqm:.2f} m²")
     st.write("#### 必要放水量")
     st.info(f"{water_volume_tons:.2f} トン")
-    st.write("#### Gemini要約")
+
+    # Gemini要約取得
+    summary_text = gemini_summarize_data(prediction_json, API_KEY, MODEL_NAME)
+    st.write("#### Geminiによる要約")
     st.info(summary_text)
 
     # 延焼進捗スライダー
@@ -315,10 +314,9 @@ def run_simulation(duration_hours, time_label):
 
     coords = create_half_circle_polygon(lat_center, lon_center, current_radius, wind_dir)
 
-    # 3Dカラムレイヤー用データ生成
-    # 各座標点をカラムとして表示、高さは water_volume_tons に基づく簡易スケール（例: water_volume_tons/50）
+    # 3Dカラムレイヤー用データ生成（各座標点を円柱として表示）
     col_data = []
-    scale_factor = 50
+    scale_factor = 50  # water_volume_tons に基づくスケール例
     for c in coords:
         col_data.append({
             "lon": c[0],
@@ -326,7 +324,6 @@ def run_simulation(duration_hours, time_label):
             "height": water_volume_tons / scale_factor
         })
 
-    # pydeck ColumnLayer による3Dカラム表示
     column_layer = pdk.Layer(
         "ColumnLayer",
         data=col_data,
