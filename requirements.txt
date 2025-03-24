@@ -1,7 +1,8 @@
 streamlit
-pydeck
 folium
 streamlit-folium
+google-generativeai
 geopandas
 shapely
 requests
+pydeck
