@@ -1,20 +1,19 @@
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
-from shapely.geometry import Point
-import geopandas as gpd
+import google.generativeai as genai
 import requests
 import json
 import math
 import re
 import pydeck as pdk
-import time
+from shapely.geometry import Point
+import geopandas as gpd
 
-# ページ設定
 st.set_page_config(page_title="火災拡大シミュレーション (pydeck版)", layout="wide")
 
-# グローバル設定（secretsからAPIキーを取得）
-API_KEY = st.secrets["general"]["api_key"]
+# Gemini設定（自身のAPIキーを入れてください）
+genai.configure(api_key=st.secrets["general"]["api_key"])
 MODEL_NAME = "gemini-2.0-flash-001"  # 使用するモデル名
 
 # セッションステートの初期化
@@ -51,7 +50,7 @@ fuel_type = fuel_options[selected_fuel]
 # メインエリア：タイトル
 st.title("火災拡大シミュレーション（Gemini要約＋pydeckアニメーション版）")
 
-# ベースマップの作成（初期位置）
+# 初期位置（固定：東京駅などから変更可）
 initial_location = [34.257586, 133.204356]
 base_map = folium.Map(location=initial_location, zoom_start=12)
 for point in st.session_state.points:
@@ -63,11 +62,18 @@ st_folium(base_map, width=700, height=500)
 def extract_json(text: str) -> dict:
     """
     テキストからJSONオブジェクトを抽出する。
+    マークダウンのコードブロック内のJSONも抽出する。
     """
     try:
-        json_obj = json.loads(text)
-        return json_obj
+        return json.loads(text)
     except json.JSONDecodeError:
+        pattern_md = r"```json\s*(\{.*?\})\s*```"
+        match_md = re.search(pattern_md, text, re.DOTALL)
+        if match_md:
+            try:
+                return json.loads(match_md.group(1))
+            except json.JSONDecodeError:
+                return {}
         return {}
 
 def get_weather(lat, lon):
@@ -237,7 +243,7 @@ def gemini_summarize_data(json_data, api_key, model_name):
         "```json\n" + json_str + "\n```\n"
         "短く簡潔な説明文でお願いします。"
     )
-    summary_text, _ = gemini_generate_text(summary_prompt, api_key, model_name)
+    summary_text, _ = gemini_generate_text(summary_prompt, API_KEY, model_name)
     return summary_text or "要約が取得できませんでした。"
 
 def run_simulation(duration_hours, time_label):
