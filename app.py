@@ -122,7 +122,6 @@ def get_weather(lat, lon):
             result["precipitation"] = data["hourly"].get("precipitation", [])[idx]
     return result
 
-@st.cache_data(show_spinner=False)
 def gemini_generate_text(prompt, api_key, model_name):
     """
     Gemini API にリクエストを送り、テキスト生成を行う関数。
@@ -307,17 +306,22 @@ def run_simulation(duration_hours, time_label):
     area_sqm = result.get("area_sqm", "不明")
     water_volume_tons = result.get("water_volume_tons", "不明")
     
-    # ユーザー向けのわかりやすいレポート表示
-    st.write("### 予測結果レポート")
+    st.write(f"### シミュレーション結果 ({time_label})")
+    st.write(f"**火災拡大半径:** {radius_m:.2f} m")
+    st.write(f"**拡大面積:** {area_sqm:.2f} m²")
+    st.write("#### 必要な消火水量")
+    st.info(f"{water_volume_tons:.2f} トン")
+    
+    # ユーザー向けレポート（説明文付き）
     st.markdown(f"""
 **火災拡大半径:** {radius_m:.2f} メートル  
-この数値は、火災が拡大する最大の距離を示しています。
+これは、火災が拡大する最大の距離を示しています。
 
 **拡大面積:** {area_sqm:.2f} 平方メートル  
-火災が及ぶ面積を示しており、周囲の被害規模の参考となります。
+この値は、火災が広がる面積を示しており、被害規模の目安となります。
 
 **必要な消火水量:** {water_volume_tons:.2f} トン  
-火災を消火するために必要とされる水量です。
+消火活動に必要な水量の目安です。
 """)
     
     summary_text = gemini_summarize_data(result, API_KEY, MODEL_NAME)
@@ -339,7 +343,7 @@ def run_simulation(duration_hours, time_label):
     else:
         coords = create_half_circle_polygon(lat_center, lon_center, current_radius, wind_dir)
     
-    # 表示モード切り替え
+    # 2D/3D 切替
     map_mode = st.radio("表示モード", ("2D", "3D"), key="map_mode")
     
     if map_mode == "2D":
