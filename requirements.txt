@@ -1,6 +1,7 @@
 streamlit
+pydeck
 folium
 streamlit-folium
-shapely
 geopandas
+shapely
 requests
