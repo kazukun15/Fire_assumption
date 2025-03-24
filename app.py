@@ -10,7 +10,6 @@ import pydeck as pdk
 from shapely.geometry import Point
 import geopandas as gpd
 import time
-
 # ここを修正：demjson -> demjson3
 import demjson3 as demjson
 
