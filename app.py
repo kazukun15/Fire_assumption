@@ -1,29 +1,24 @@
 import streamlit as st
+import folium
+from streamlit_folium import st_folium
 import google.generativeai as genai
 import requests
 import json
-import math
 import re
 import pydeck as pdk
-import folium
-from streamlit_folium import st_folium
+import demjson
 from shapely.geometry import Point
 import geopandas as gpd
+import time
 
 # ページ設定
-st.set_page_config(page_title="火災拡大シミュレーション", layout="wide")
+st.set_page_config(page_title="火災拡大シミュレーション (3Dカラム版)", layout="wide")
 
-# -----------------------------------------------------
-# secrets.toml の構成例:
-# [general]
-# api_key = "AIzasyxxxxxx..."
-# -----------------------------------------------------
-# これにより st.secrets["general"]["api_key"] で取得可能
-
+# secretsからAPIキーを取得（[general]セクションのapi_key）
 API_KEY = st.secrets["general"]["api_key"]
 MODEL_NAME = "gemini-2.0-flash-001"
 
-# Gemini API の設定
+# google.generativeai (Gemini) の初期設定
 genai.configure(api_key=API_KEY)
 
 # セッションステートの初期化
@@ -32,9 +27,7 @@ if 'points' not in st.session_state:
 if 'weather_data' not in st.session_state:
     st.session_state.weather_data = {}
 
-# --------------------------------------------
-# サイドバー: 発生地点の入力
-# --------------------------------------------
+# サイドバー：火災発生地点の入力
 st.sidebar.title("火災発生地点の入力")
 with st.sidebar.form(key='location_form'):
     lat_input = st.number_input("緯度", format="%.6f", value=34.257586)
@@ -44,13 +37,12 @@ with st.sidebar.form(key='location_form'):
         st.session_state.points.append((lat_input, lon_input))
         st.sidebar.success(f"地点 ({lat_input}, {lon_input}) を追加しました。")
 
+# サイドバー：登録地点消去ボタン
 if st.sidebar.button("登録地点を消去"):
     st.session_state.points = []
     st.sidebar.info("全ての発生地点を削除しました。")
 
-# --------------------------------------------
-# サイドバー: 燃料特性の選択
-# --------------------------------------------
+# サイドバー：燃料特性の選択
 st.sidebar.title("燃料特性の選択")
 fuel_options = {
     "森林（高燃料）": "森林",
@@ -60,42 +52,51 @@ fuel_options = {
 selected_fuel = st.sidebar.selectbox("燃料特性を選択してください", list(fuel_options.keys()))
 fuel_type = fuel_options[selected_fuel]
 
-# メインタイトル
-st.title("火災拡大シミュレーション（Gemini + pydeck）")
+# メインエリア：タイトル
+st.title("火災拡大シミュレーション（Gemini要約＋3Dカラム表示）")
 
-# 初期マップ表示
+# ベースマップの作成（初期位置）
 initial_location = [34.257586, 133.204356]
-m = folium.Map(location=initial_location, zoom_start=12)
+base_map = folium.Map(location=initial_location, zoom_start=12)
 for point in st.session_state.points:
-    folium.Marker(location=point, icon=folium.Icon(color='red')).add_to(m)
-st_folium(m, width=700, height=500)
+    folium.Marker(location=point, icon=folium.Icon(color='red')).add_to(base_map)
+st_folium(base_map, width=700, height=500)
 
-# --------------------------------------------
-# JSON抽出用の関数
-# --------------------------------------------
+# --- 関数定義 ---
+
 def extract_json(text: str) -> dict:
     """
-    文字列から JSON を抽出する。
-    直接 json.loads() -> 失敗ならマークダウンのコードブロックから抽出
+    テキストからJSONオブジェクトを抽出する（多様なパターンに対応）。
+    jsonライブラリと demjson の両方でパースを試みる。
     """
     try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pattern_md = r"```json\s*(\{.*?\})\s*```"
-        match_md = re.search(pattern_md, text, re.DOTALL)
-        if match_md:
+        text = text.strip()
+        # まずは不要な文字や改行を削除
+        # 正規表現でJSON部分を抽出
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            json_str = match.group(0)
             try:
-                return json.loads(match_md.group(1))
+                # 標準のjsonライブラリで解析を試みる
+                return json.loads(json_str)
             except json.JSONDecodeError:
-                return {}
+                try:
+                    # demjsonライブラリで解析を試みる
+                    return demjson.decode(json_str)
+                except demjson.JSONDecodeError:
+                    st.error("demjsonによるJSON解析にも失敗しました。")
+                    return {}
+        else:
+            st.error("JSON文字列が見つかりませんでした。")
+            return {}
+    except Exception as e:
+        st.error(f"JSON抽出中にエラーが発生しました: {e}")
         return {}
 
-# --------------------------------------------
-# 気象データ取得用の関数
-# --------------------------------------------
 def get_weather(lat, lon):
     """
-    Open-Meteo API から気象情報を取得
+    Open-Meteo APIから指定緯度・経度の気象情報を取得する関数。
+    温度、風速、風向、湿度、降水量などの情報を返す。
     """
     url = (
         f"https://api.open-meteo.com/v1/forecast?"
@@ -121,10 +122,10 @@ def get_weather(lat, lon):
             result["precipitation"] = data["hourly"].get("precipitation", [])[idx]
     return result
 
-# --------------------------------------------
-# 半円形ポリゴン生成
-# --------------------------------------------
-def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_deg):
+def create_half_circle_coords(center_lat, center_lon, radius_m, wind_direction_deg):
+    """
+    風向きを考慮した半円形（扇形）の座標列を生成（[lon, lat]形式）。
+    """
     deg_per_meter = 1.0 / 111000.0
     start_angle = wind_direction_deg - 90
     end_angle = wind_direction_deg + 90
@@ -143,10 +144,10 @@ def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_
         coords.append([new_lon, new_lat])
     return coords
 
-# --------------------------------------------
-# Gemini API でテキスト生成
-# --------------------------------------------
 def gemini_generate_text(prompt, api_key, model_name):
+    """
+    Gemini API のエンドポイントにリクエストを送り、テキスト生成を行う。
+    """
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
     data = {
@@ -171,10 +172,10 @@ def gemini_generate_text(prompt, api_key, model_name):
     else:
         return None, raw_json
 
-# --------------------------------------------
-# 火災拡大予測
-# --------------------------------------------
 def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fuel_type):
+    """
+    Gemini API を利用して火災拡大予測を行う関数。
+    """
     rep_lat, rep_lon = points[0]
     wind_speed = weather['windspeed']
     wind_dir = weather['winddirection']
@@ -185,7 +186,7 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fu
     elevation_info = "標高150m程度"
     vegetation_info = "松林と草地が混在"
 
-    # 絶対に純粋なJSON形式のみを返すように指示
+    # プロンプト
     detailed_prompt = (
         "あなたは火災拡大シミュレーションの専門家です。以下の条件に基づき、火災の拡大予測を数値で出力してください。\n"
         f"- 発生地点: 緯度 {rep_lat}, 経度 {rep_lon}\n"
@@ -213,32 +214,21 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fu
         st.error("Gemini APIから有効な応答が得られませんでした。")
         return None
 
-    # 抽出
+    # 予測結果JSONを抽出
     prediction_json = extract_json(generated_text)
     if not prediction_json:
         st.error("予測結果の解析に失敗しました。返却されたテキストを確認してください。")
         st.markdown(f"`json\n{generated_text}\n`")
         return None
 
+    # JSONオブジェクトの必須キーを確認
+    required_keys = ["radius_m", "area_sqm", "water_volume_tons"]
+    if not all(key in prediction_json for key in required_keys):
+        st.error(f"JSONに必須キー {required_keys} が含まれていません。")
+        return None
+
     return prediction_json
 
-# --------------------------------------------
-# 結果を要約
-# --------------------------------------------
-def gemini_summarize_data(json_data, api_key, model_name):
-    json_str = json.dumps(json_data, ensure_ascii=False, indent=2)
-    summary_prompt = (
-        "あなたはデータをわかりやすく説明するアシスタントです。\n"
-        "次の火災拡大シミュレーション結果のJSONを確認し、その内容を一般の方が理解しやすい日本語で要約してください。\n"
-        "```json\n" + json_str + "\n```\n"
-        "短く簡潔な説明文でお願いします。"
-    )
-    summary_text, _ = gemini_generate_text(summary_prompt, API_KEY, model_name)
-    return summary_text or "要約が取得できませんでした。"
-
-# --------------------------------------------
-# シミュレーション実行
-# --------------------------------------------
 def run_simulation(duration_hours, time_label):
     if 'weather_data' not in st.session_state or not st.session_state.weather_data:
         st.error("気象データが取得されていません。")
@@ -260,48 +250,56 @@ def run_simulation(duration_hours, time_label):
     if prediction_json is None:
         return
 
-    # 予測結果から値を取得
     radius_m = prediction_json.get("radius_m", 0)
     area_sqm = prediction_json.get("area_sqm", 0)
     water_volume_tons = prediction_json.get("water_volume_tons", 0)
 
-    # 要約を取得
-    summary_text = gemini_summarize_data(prediction_json, API_KEY, MODEL_NAME)
-
+    # 結果表示
     st.write(f"### シミュレーション結果 ({time_label})")
-    st.write("#### Geminiによる要約結果")
-    st.info(summary_text)
-
-    # 値を表示
     st.write(f"**半径**: {radius_m:.2f} m")
     st.write(f"**面積**: {area_sqm:.2f} m²")
     st.write("#### 必要放水量")
     st.info(f"{water_volume_tons:.2f} トン")
 
-    # アニメーション用のスライダー
+    # スライダーで延焼進捗を指定
     progress = st.slider("延焼進捗 (%)", 0, 100, 100, key="progress_slider")
     fraction = progress / 100.0
     current_radius = radius_m * fraction
 
-    # 中心地点と風向き
+    # 中心と風向
     lat_center, lon_center = st.session_state.points[0]
     wind_dir = st.session_state.weather_data["winddirection"]
 
-    coords = create_half_circle_polygon(lat_center, lon_center, current_radius, wind_dir)
+    coords = create_half_circle_coords(lat_center, lon_center, current_radius, wind_dir)
 
-    # pydeckによるアニメーション表示
-    polygon_layer = pdk.Layer(
-        "PolygonLayer",
-        data=[{"coordinates": [coords]}],
-        get_polygon="coordinates",
-        get_fill_color="[255, 0, 0, 100]",
+    # 3Dカラムレイヤー用データ
+    col_data = []
+    for c in coords:
+        col_data.append({
+            "lon": c[0],
+            "lat": c[1],
+            "height": 100  # 高さ
+        })
+
+    # ColumnLayer で3Dカラム表示
+    column_layer = pdk.Layer(
+        "ColumnLayer",
+        data=col_data,
+        get_position='[lon, lat]',
+        get_elevation='height',  # カラムの高さ
+        get_radius=30,           # カラムの太さ
+        elevation_scale=1,
+        get_fill_color='[200, 30, 30, 200]',
         pickable=True,
         auto_highlight=True,
     )
     view_state = pdk.ViewState(
-        latitude=lat_center, longitude=lon_center, zoom=13, pitch=0
+        latitude=lat_center,
+        longitude=lon_center,
+        zoom=13,
+        pitch=45  # 3D感を出すために少し角度を付ける
     )
-    deck = pdk.Deck(layers=[polygon_layer], initial_view_state=view_state)
+    deck = pdk.Deck(layers=[column_layer], initial_view_state=view_state)
     st.pydeck_chart(deck)
 
 # 気象データ取得ボタン
@@ -316,7 +314,7 @@ if st.button("気象データ取得"):
 
 st.write("## 消火活動が行われない場合のシミュレーション")
 
-# 時間単位の切り替え
+# 日/週/月単位でのシミュレーションタブ
 tab_day, tab_week, tab_month = st.tabs(["日単位", "週単位", "月単位"])
 
 with tab_day:
