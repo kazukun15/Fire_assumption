@@ -2,7 +2,8 @@ streamlit
 folium
 streamlit-folium
 google-generativeai
-geopandas
-shapely
 requests
 pydeck
+geopandas
+shapely
+demjson
