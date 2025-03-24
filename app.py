@@ -8,7 +8,7 @@ import math
 import re
 import pydeck as pdk
 import time
-import demjson3 as demjson  # Python 3 用の demjson のフォーク
+import demjson3 as demjson  # Python3 用 demjson のフォーク
 from shapely.geometry import Point
 import geopandas as gpd
 
@@ -70,18 +70,19 @@ st_folium(base_map, width=700, height=500)
 # -----------------------------
 def extract_json(text: str) -> dict:
     """
-    テキストからJSONオブジェクトを抽出する（多様なパターンに対応）。
-    まず直接 json.loads() を試み、失敗した場合は正規表現で抽出し、
-    demjson3 を利用して解析を試みる。
+    テキストからJSONオブジェクトを抽出する関数。
+    Gemini の応答の外側の形式が不正でも、最初に現れる { ... } 部分を抽出して解析します。
     """
     text = text.strip()
     try:
+        # まず直接パースを試みる
         return json.loads(text)
     except json.JSONDecodeError:
-        pattern = r"\{.*\}"
+        # 正規表現で { ... } 部分を抽出
+        pattern = r"```json\s*(\{.*?\})\s*```"
         match = re.search(pattern, text, re.DOTALL)
         if match:
-            json_str = match.group(0)
+            json_str = match.group(1)
             try:
                 return json.loads(json_str)
             except json.JSONDecodeError:
@@ -97,8 +98,8 @@ def extract_json(text: str) -> dict:
 @st.cache_data(show_spinner=False)
 def get_weather(lat, lon):
     """
-    Open-Meteo APIから指定緯度・経度の気象情報を取得する。
-    温度、風速、風向、湿度、降水量などの情報を返す。
+    Open-Meteo APIから指定緯度・経度の気象情報を取得する関数。
+    温度、風速、風向、湿度、降水量などの情報を返します。
     """
     url = (
         f"https://api.open-meteo.com/v1/forecast?"
@@ -128,7 +129,7 @@ def get_weather(lat, lon):
 def gemini_generate_text(prompt, api_key, model_name):
     """
     Gemini API にリクエストを送り、テキスト生成を行う関数。
-    生のJSON応答も返す。
+    生のJSON応答も返します。
     """
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
@@ -156,8 +157,8 @@ def gemini_generate_text(prompt, api_key, model_name):
 
 def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_deg):
     """
-    風向きを考慮した半円形（扇形）の座標列を生成する。
-    pydeck用に [lon, lat] の形式で返す。
+    風向きを考慮した半円形（扇形）の座標列を生成する関数。
+    pydeck用に [lon, lat] の形式で返します。
     """
     deg_per_meter = 1.0 / 111000.0
     start_angle = wind_direction_deg - 90
@@ -179,31 +180,23 @@ def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_
 
 def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fuel_type):
     """
-    Gemini API を利用して火災拡大予測を行う関数。
+    Gemini API を利用して火災拡大予測を行う関数です。
     最新の気象データおよび下記の条件に基づいてシミュレーションを実施します。
     
-    条件:
-      - 発生地点: 緯度 {rep_lat}, 経度 {rep_lon}
-      - 気象条件: 風速 {wind_speed} m/s, 風向 {wind_dir} 度, 時間経過 {duration_hours} 時間,
-        温度 {temperature}°C, 湿度 {humidity_info}, 降水量 {precipitation_info}
-      - 地形情報: 傾斜 {slope_info}, 標高 {elevation_info}
-      - 植生: {vegetation_info}
-      - 燃料特性: {fuel_type}
+    【条件】
+    ・発生地点: 緯度 {rep_lat}, 経度 {rep_lon}
+    ・気象条件: 温度 {temperature}°C, 風速 {wind_speed} m/s, 風向 {wind_dir} 度, 
+      湿度 {humidity_info}, 降水量 {precipitation_info}
+    ・地形情報: 傾斜 {slope_info}, 標高 {elevation_info}
+    ・植生: {vegetation_info}
+    ・燃料特性: {fuel_type}
     
-    出力形式（厳密にこれのみ）:
-    {
-      "radius_m": <火災拡大半径（m）>,
-      "area_sqm": <拡大面積（m²）>,
-      "water_volume_tons": <消火水量（トン）>
-    }
-    
-    出力例:
-    {
-      "radius_m": 650.00,
-      "area_sqm": 1327322.89,
-      "water_volume_tons": 475.50
-    }
-    
+    【求める出力】
+    絶対に純粋なJSON形式のみを出力してください（他のテキストを含むな）。
+    出力形式:
+    {"radius_m": <火災拡大半径（m）>, "area_sqm": <拡大面積（m²）>, "water_volume_tons": <消火水量（トン）>}
+    例:
+    {"radius_m": 650.00, "area_sqm": 1327322.89, "water_volume_tons": 475.50}
     もしこの形式と異なる場合は、必ずエラーを出力してください。
     """
     rep_lat, rep_lon = points[0]
