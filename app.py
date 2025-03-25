@@ -36,79 +36,53 @@ if 'weather_data' not in st.session_state:
     st.session_state.weather_data = {}
 
 # -----------------------------
-# verify_with_tavily 関数（Tavily 検証）
-# -----------------------------
-def verify_with_tavily(radius, wind_direction, water_volume):
-    if not TAVILY_TOKEN:
-        return ["Tavilyのトークンが設定されていないため、検証できません。"]
-    try:
-        url = "https://api.tavily.com/search"
-        query = "火災 拡大半径 一般的"
-        payload = {
-            "query": query,
-            "topic": "fire",
-            "search_depth": "basic",
-            "chunks_per_source": 3,
-            "max_results": 1,
-            "time_range": None,
-            "days": 3,
-            "include_answer": True,
-            "include_raw_content": False,
-            "include_images": False,
-            "include_image_descriptions": False,
-            "include_domains": [],
-            "exclude_domains": []
-        }
-        headers = {
-            "Authorization": f"Bearer {TAVILY_TOKEN}",
-            "Content-Type": "application/json"
-        }
-        response = requests.post(url, json=payload, headers=headers)
-        result = response.json()
-        messages = []
-        if "answer" in result and result["answer"]:
-            messages.append(f"Tavily検索結果: {result['answer']}")
-        else:
-            messages.append("Tavily検索結果が見つかりませんでした。元のデータを使用します。")
-        return messages
-    except Exception as e:
-        st.error(f"Tavily検証中にエラーが発生しました: {e}")
-        return ["Tavily検証中にエラーが発生しました。"]
-
-# -----------------------------
 # サイドバー入力
 # -----------------------------
 st.sidebar.header("入力設定")
-lat = st.sidebar.number_input("緯度", value=34.257586)
-lon = st.sidebar.number_input("経度", value=133.204356)
+# 初期中心位置の入力（地図の中心位置として使用）
+default_lat = st.sidebar.number_input("初期中心 緯度", value=34.257586)
+default_lon = st.sidebar.number_input("初期中心 経度", value=133.204356)
 fuel_type = st.sidebar.selectbox("燃料特性", ["森林", "草地", "都市部"])
+
+# 発火地点追加ボタン（地図の中心位置を発火地点として追加）
+# ※st_folium の戻り値に "center" キーが含まれていると仮定
+map_data = st.empty()  # ここで後で地図を表示
 if st.sidebar.button("発生地点を追加"):
-    st.session_state.points.append((lat, lon))
-    st.sidebar.success(f"地点 ({lat}, {lon}) を追加しました。")
+    if "center" in st.session_state:
+        new_point = st.session_state["center"]
+    else:
+        new_point = [default_lat, default_lon]
+    st.session_state.points.append(new_point)
+    st.sidebar.success(f"発生地点 {new_point} を追加しました。")
 if st.sidebar.button("登録地点を消去"):
     st.session_state.points = []
     st.sidebar.info("全ての発生地点を削除しました。")
 
+# 表示モード（2D/3D）はサイドバーから選択
 display_mode = st.sidebar.radio("表示モード", ("2D", "3D"))
+# シナリオ選択（消火活動なし／通常の消火活動あり）
 scenario = st.sidebar.radio("シナリオ選択", ("消火活動なし", "通常の消火活動あり"))
 
 # -----------------------------
-# 初期マップ（2D）表示
+# 初期マップ（2D）表示：中心位置は、セッションに保存されている発生地点があればその最後の位置、なければ初期入力の中心
 # -----------------------------
 st.title("火災拡大シミュレーション（Gemini要約＋2D/3D レポート＆マッピング版）")
-try:
-    # マップ中心は、発火地点がある場合は最後に追加された点
-    if st.session_state.points:
-        center = st.session_state.points[-1]
-    else:
-        center = [lat, lon]
-    base_map = folium.Map(location=center, zoom_start=12)
-    for point in st.session_state.points:
-        folium.Marker(location=point, icon=folium.Icon(color='red')).add_to(base_map)
-    st_folium(base_map, width=700, height=500)
-except Exception as e:
-    st.error(f"初期マップの描写でエラーが発生しました: {e}")
+if st.session_state.points:
+    center = st.session_state.points[-1]
+else:
+    center = [default_lat, default_lon]
+base_map = folium.Map(location=center, zoom_start=12)
+for point in st.session_state.points:
+    folium.Marker(location=point, icon=folium.Icon(color='red')).add_to(base_map)
+# st_folium の戻り値から現在の地図中心を取得
+map_data = st_folium(base_map, width=700, height=500)
+# 保存：現在の地図中心をセッションステートに保存
+if "center" not in st.session_state and "center" in map_data:
+    st.session_state["center"] = map_data["center"]
 
+# -----------------------------
+# 関数定義
+# -----------------------------
 def extract_json(text: str) -> dict:
     text = text.strip()
     try:
@@ -348,7 +322,7 @@ def run_simulation(duration_hours, time_label):
         return
     try:
         area_sqm = float(result.get("area_sqm", 0))
-        area_ha = area_sqm / 10000.0
+        area_ha = area_sqm / 10000.0  # 1ヘクタール = 10,000㎡
     except (KeyError, ValueError):
         area_sqm = "不明"
         area_ha = "不明"
@@ -384,7 +358,6 @@ def run_simulation(duration_hours, time_label):
     for msg in verification_msgs:
         st.write(msg)
     
-    # シナリオに応じた計算
     if scenario == "通常の消火活動あり":
         suppression_factor = 0.5
         effective_radius = radius_m * suppression_factor
@@ -410,6 +383,7 @@ def run_simulation(duration_hours, time_label):
     fraction = progress / 100.0
     current_radius = used_radius * fraction
     
+    # ここでは、発火点はセッションに保存された最初の点の座標を使用
     lat_center, lon_center = st.session_state.points[0]
     wind_dir = st.session_state.weather_data.get("winddirection", 0)
     
@@ -420,33 +394,31 @@ def run_simulation(duration_hours, time_label):
         st.error(f"座標生成エラー: {e}")
         coords = []
     
-    # アニメーション開始ボタン（押すと延焼範囲のアニメーションを2回実行）
-    if st.button("アニメーション開始"):
+    # アニメーション：延焼範囲のアニメーション表示（2回繰り返し、最終状態を表示）
+    if st.button("延焼範囲アニメーション開始"):
         anim_placeholder = st.empty()
-        # アニメーション：0から current_radius まで、step 毎に更新（2回繰り返す）
         for cycle in range(2):
             for r in range(0, int(current_radius) + 1, max(1, int(current_radius)//20)):
                 try:
-                    m = folium.Map(location=[lat_center, lon_center], zoom_start=13)
-                    folium.Marker(location=[lat_center, lon_center], popup="火災発生地点", icon=folium.Icon(color="red")).add_to(m)
-                    folium.Circle(location=[lat_center, lon_center], radius=r, color="red", fill=True, fill_opacity=0.5).add_to(m)
+                    m_anim = folium.Map(location=[lat_center, lon_center], zoom_start=13)
+                    folium.Marker(location=[lat_center, lon_center], popup="発火地点", icon=folium.Icon(color="red")).add_to(m_anim)
+                    folium.Circle(location=[lat_center, lon_center], radius=r, color="red", fill=True, fill_opacity=0.5).add_to(m_anim)
                     anim_placeholder.empty()
-                    st_folium(m, width=700, height=500)
+                    st_folium(m_anim, width=700, height=500)
                     time.sleep(0.1)
                 except Exception as e:
-                    st.error(f"アニメーション描写中エラー: {e}")
+                    st.error(f"アニメーション中エラー: {e}")
                     break
-        # アニメーション終了後、最終状態のマップを表示
         final_map = folium.Map(location=[lat_center, lon_center], zoom_start=13)
-        folium.Marker(location=[lat_center, lon_center], popup="火災発生地点", icon=folium.Icon(color="red")).add_to(final_map)
+        folium.Marker(location=[lat_center, lon_center], popup="発火地点", icon=folium.Icon(color="red")).add_to(final_map)
         folium.Circle(location=[lat_center, lon_center], radius=current_radius, color="red", fill=True, fill_opacity=0.5).add_to(final_map)
         anim_placeholder.empty()
         st_folium(final_map, width=700, height=500)
     
-    # 表示モード切替（2D/3D）
+    # 表示モード切替
     if display_mode == "2D":
         m2d = folium.Map(location=[lat_center, lon_center], zoom_start=13)
-        folium.Marker(location=[lat_center, lon_center], popup="火災発生地点", icon=folium.Icon(color="red")).add_to(m2d)
+        folium.Marker(location=[lat_center, lon_center], popup="発火地点", icon=folium.Icon(color="red")).add_to(m2d)
         folium.Circle(location=[lat_center, lon_center], radius=current_radius, color="red", fill=True, fill_opacity=0.5).add_to(m2d)
         st.write("#### Folium 地図（延焼範囲）")
         st_folium(m2d, width=700, height=500)
@@ -470,7 +442,7 @@ def run_simulation(duration_hours, time_label):
             get_elevation='height',
             get_radius=30,
             elevation_scale=1,
-            get_fill_color='[200, 30, 30, 100]',
+            get_fill_color='[200, 30, 30, 100]',  # アルファ値100
             pickable=True,
             auto_highlight=True,
         )
@@ -481,8 +453,8 @@ def run_simulation(duration_hours, time_label):
             pitch=45
         )
         deck = pdk.Deck(layers=[column_layer], initial_view_state=view_state)
-        st.write("#### pydeck 3Dカラム表示")
-        st.pydeck_chart(deck)
+        st.write("#### 延焼範囲")
+        st.pydeck_chart(deck, key="pydeck_chart_key_" + str(time.time()))
 
 # -----------------------------
 # 気象データ取得ボタン
