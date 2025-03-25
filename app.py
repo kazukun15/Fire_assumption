@@ -15,7 +15,7 @@ from shapely.geometry import Point
 import geopandas as gpd
 
 # --- ページ設定 ---
-st.set_page_config(page_title="火災拡大シミュレーション (DEM＆アニメーション付き)", layout="wide")
+st.set_page_config(page_title="火災拡大シミュレーション (DEM＆自動表示)", layout="wide")
 
 # --- API設定 ---
 API_KEY = st.secrets["general"]["api_key"]
@@ -24,32 +24,43 @@ try:
     YAHOO_APPID = st.secrets["yahoo"]["appid"]
 except Exception:
     YAHOO_APPID = None
-    st.warning("Yahoo! API の appid が設定されていません。")
 try:
     TAVILY_TOKEN = st.secrets["tavily"]["api_key"]
 except Exception:
     TAVILY_TOKEN = None
-    st.warning("Tavily のトークンが設定されていません。")
 try:
     MAPBOX_TOKEN = st.secrets["mapbox"]["access_token"]
 except Exception:
     MAPBOX_TOKEN = None
-    st.warning("Mapbox のアクセストークンが設定されていません。")
 
 # --- Gemini API 初期設定 ---
 genai.configure(api_key=API_KEY)
 
 # --- セッションステート初期化 ---
 if 'points' not in st.session_state:
-    st.session_state.points = []
+    # 発生地点をデフォルトで設定
+    st.session_state.points = [(34.257493583590986, 133.20437169456872)]
 if 'weather_data' not in st.session_state:
-    st.session_state.weather_data = {}
+    # 初期値として気象データを自動取得（取得に失敗した場合はダミーデータを設定）
+    default_weather = {
+        "temperature": 25,
+        "windspeed": 3,
+        "winddirection": 90,
+        "humidity": 50,
+        "precipitation": 0
+    }
+    try:
+        st.session_state.weather_data = requests.get(
+            f"https://api.open-meteo.com/v1/forecast?latitude=34.257493583590986&longitude=133.20437169456872&current_weather=true&hourly=relativehumidity_2m,precipitation&timezone=auto", timeout=10
+        ).json().get("current_weather", default_weather)
+    except Exception:
+        st.session_state.weather_data = default_weather
 
 # --- グローバル変数 ---
 default_lat = 34.257493583590986
 default_lon = 133.20437169456872
 
-# サイドバーウィジェット
+# サイドバー（任意で変更可能）
 fuel_type = st.sidebar.selectbox("燃料タイプ", ["森林", "草地", "都市部"])
 scenario = st.sidebar.selectbox("消火シナリオ", ["通常の消火活動あり", "消火活動なし"])
 map_style_choice = st.sidebar.selectbox("地図スタイル", ["カラー", "ダーク"])
@@ -102,8 +113,7 @@ def extract_json(text: str) -> dict:
     st.error("有効なJSONが見つかりませんでした。")
     return {}
 
-# ----- 各種関数 -----
-
+# ----- 以下、各種関数 -----
 def verify_with_tavily(radius, wind_direction, water_volume):
     if not TAVILY_TOKEN:
         return ["Tavilyのトークンが設定されていません。"]
@@ -445,26 +455,26 @@ def run_simulation(time_label):
     color_rgba = get_color_by_days(burn_days)
     color_hex = rgb_to_hex(color_rgba)
     
-    # 静的延焼範囲（最大可能性＝消火活動なし）
+    # 静的延焼範囲（最大可能性：消火活動なし）
     if fuel_type == "森林":
         static_coords = get_mountain_shape(lat_center, lon_center, radius_m)
     else:
         static_coords = create_half_circle_polygon(lat_center, lon_center, radius_m,
                                                     st.session_state.weather_data.get("winddirection", 0))
     
-    # 1. Foliumマップの生成（静的レイヤーと動的レイヤーを同じマップに追加）
+    # 1. Foliumマップ生成（静的レイヤーと動的レイヤーを統合）
     m = folium.Map(location=[lat_center, lon_center], zoom_start=13, tiles="OpenStreetMap", control_scale=True)
-    # 静的レイヤー（延焼範囲）
+    # 静的レイヤー：延焼範囲
     folium.Polygon(locations=static_coords, color=color_hex, fill=True, fill_opacity=0.5,
                    tooltip="最大延焼範囲 (静的)").add_to(m)
-    # 発生地点（小さな赤丸）
+    # 発生地点：小さな赤丸
     folium.CircleMarker(location=[lat_center, lon_center], radius=5, color="red", fill=True, fill_color="red",
                         tooltip="発生地点").add_to(m)
-    # 動的レイヤー用 FeatureGroup の追加
+    # 動的レイヤー用 FeatureGroupの追加
     dynamic_fg = folium.FeatureGroup(name="Dynamic Animation")
     m.add_child(dynamic_fg)
     
-    # 2. 静的結果とレポートの表示
+    # 2. 静的結果とレポートの表示（画面上部に表示）
     st.subheader("シミュレーション結果 (静的表示)")
     st.markdown(f"""
 **シミュレーション結果：**
@@ -484,13 +494,13 @@ def run_simulation(time_label):
    - 風向 {st.session_state.weather_data.get("winddirection", "不明")} 度、風速 {st.session_state.weather_data.get("windspeed", "不明")} m/s により、火災は風下側へ不均一に延焼。  
    - 最大可能性の延焼範囲は全方向に広がると仮定。
 3. **可能性について**  
-   - 早期消火の重要性と、継続的なモニタリングが必要です。
+   - 早期消火の重要性と、継続的なモニタリングが求められます。
 """
     st.markdown(report_text)
     
-    # 3. アニメーション表示（同一マップ上に動的レイヤーを更新）
+    # 3. アニメーション表示（同一マップ上で動的レイヤーを更新）
     st.subheader("延焼範囲アニメーション")
-    animation_placeholder = st.empty()  # st.empty() でプレースホルダーを作成
+    animation_placeholder = st.empty()  # アニメーション用プレースホルダー
     if st.button("延焼範囲アニメーション開始", key="anim_start"):
         if animation_type == "Full Circle":
             for r in range(0, int(radius_m) + 1, max(1, int(radius_m)//20)):
@@ -548,7 +558,6 @@ def run_simulation(time_label):
                 zindex=1,
             ).add_to(m)
     
-    # 最後に統合マップを再表示
     st.subheader("最終地図（静的＋動的）")
     st_folium(m, width=700, height=500)
 
