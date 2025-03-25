@@ -45,14 +45,54 @@ if 'weather_data' not in st.session_state:
     st.session_state.weather_data = {}
 
 # -----------------------------
-# ヘルパー関数：日数に応じた色を算出（1日 → 緑、10日以上 → 赤）
+# verify_with_tavily 関数（グローバル定義）
+# -----------------------------
+def verify_with_tavily(radius, wind_direction, water_volume):
+    if not TAVILY_TOKEN:
+        return ["Tavilyのトークンが設定されていないため、検証できません。"]
+    try:
+        url = "https://api.tavily.com/search"
+        query = "火災 拡大半径 一般的"
+        payload = {
+            "query": query,
+            "topic": "fire",
+            "search_depth": "basic",
+            "chunks_per_source": 3,
+            "max_results": 1,
+            "time_range": None,
+            "days": 3,
+            "include_answer": True,
+            "include_raw_content": False,
+            "include_images": False,
+            "include_image_descriptions": False,
+            "include_domains": [],
+            "exclude_domains": []
+        }
+        headers = {
+            "Authorization": f"Bearer {TAVILY_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        response = requests.post(url, json=payload, headers=headers)
+        result = response.json()
+        messages = []
+        if "answer" in result and result["answer"]:
+            messages.append(f"Tavily検索結果: {result['answer']}")
+        else:
+            messages.append("Tavily検索結果が見つかりませんでした。元のデータを使用します。")
+        return messages
+    except Exception as e:
+        st.error(f"Tavily検証中エラー: {e}")
+        return ["Tavily検証中にエラーが発生しました。"]
+
+# -----------------------------
+# ヘルパー関数：燃焼日数に応じた色
 def get_color_by_days(days):
-    # 緑: (0,255,0)、赤: (255,0,0) への線形補間
+    # 1日: 緑 (0,255,0) 〜 10日以上: 赤 (255,0,0) へのグラデーション
     ratio = min(days / 10, 1)
     r = int(255 * ratio)
     g = int(255 * (1 - ratio))
     b = 0
-    return (r, g, b, 150)  # α=150
+    return (r, g, b, 150)
 
 def rgb_to_hex(color):
     r, g, b, a = color
@@ -69,7 +109,6 @@ with st.sidebar.expander("シミュレーション設定", expanded=True):
     show_raincloud = st.checkbox("雨雲オーバーレイ表示", value=True)
 
 if st.sidebar.button("発生地点を追加"):
-    # 発火地点は st_folium の "center" または初期中心位置
     if "center" in st.session_state:
         new_point = st.session_state["center"]
         if isinstance(new_point, dict):
@@ -394,14 +433,13 @@ def get_flat_polygon_layer(coords, water_volume, color):
         "PolygonLayer",
         data=polygon_data,
         get_polygon="polygon",
-        get_fill_color=str(color),  # 例: "[200, 30, 30, 100]"
+        get_fill_color=str(color),  # RGBA 形式の文字列
         pickable=True,
         auto_highlight=True,
     )
     return layer
 
-# -----------------------------
-# 3D表示用の DEM を重ねる TerrainLayer（Mapbox）
+# DEM 表示用 TerrainLayer（Mapbox）
 def get_terrain_layer():
     if not MAPBOX_TOKEN:
         return None
@@ -503,23 +541,22 @@ def run_simulation(duration_hours, time_label):
     else:
         used_radius = radius_m
 
-    # 燃焼継続日数に応じた色を決定（duration_hours から日数算出）
+    # 燃焼継続日数に応じた色分け（duration_hoursから日数算出）
     burn_days = duration_hours / 24
     color_rgba = get_color_by_days(burn_days)
     color_hex = rgb_to_hex(color_rgba)
 
-    current_radius = used_radius  # 進捗スライダーは廃止し、全体延焼範囲をそのまま表示
+    current_radius = used_radius  # 延焼進捗スライダーは廃止し、全延焼範囲を表示
 
     lat_center, lon_center = st.session_state.points[0]
     wind_dir = st.session_state.weather_data.get("winddirection", 0)
     
-    # 延焼形状：燃料特性が森林の場合は山岳形状、その他は円形
     if fuel_type == "森林":
         shape_coords = get_mountain_shape(lat_center, lon_center, current_radius)
     else:
         shape_coords = create_half_circle_polygon(lat_center, lon_center, current_radius, wind_dir)
     
-    # 延焼範囲アニメーション（2回実行、最終状態を保持）
+    # アニメーション：延焼範囲が徐々に拡大する様子を2回実行し、最終状態を表示
     if st.button("延焼範囲アニメーション開始"):
         anim_placeholder = st.empty()
         final_map = None
@@ -527,7 +564,7 @@ def run_simulation(duration_hours, time_label):
             for r in range(0, int(current_radius) + 1, max(1, int(current_radius)//20)):
                 try:
                     m_anim = folium.Map(location=[lat_center, lon_center], zoom_start=13)
-                    # 発火地点に十字マーカー追加
+                    # 中心に十字マーカー
                     cross_icon = folium.DivIcon(html='<div style="font-size:24px; color:blue;">&#10010;</div>')
                     folium.Marker(location=[lat_center, lon_center], icon=cross_icon).add_to(m_anim)
                     if fuel_type == "森林":
@@ -535,7 +572,7 @@ def run_simulation(duration_hours, time_label):
                         folium.Polygon(locations=poly, color=color_hex, fill=True, fill_opacity=0.5).add_to(m_anim)
                     else:
                         folium.Circle(location=[lat_center, lon_center], radius=r, color=color_hex, fill=True, fill_opacity=0.5).add_to(m_anim)
-                    anim_placeholder.empty()
+                    anim_placeholder.markdown("")  # 更新
                     st_folium(m_anim, width=700, height=500)
                     time.sleep(0.1)
                     final_map = m_anim
@@ -543,10 +580,9 @@ def run_simulation(duration_hours, time_label):
                     st.error(f"アニメーション中エラー: {e}")
                     break
         if final_map is not None:
-            anim_placeholder.empty()
             st_folium(final_map, width=700, height=500)
     
-    # 2D 表示（Folium）: 延焼範囲を平面のポリゴンとして表示（色は burn_days に応じた色）
+    # 表示モード切替（延焼範囲は平面ポリゴンで表示）
     if display_mode == "2D":
         m2d = folium.Map(location=[lat_center, lon_center], zoom_start=13)
         cross_icon = folium.DivIcon(html='<div style="font-size:24px; color:blue;">&#10010;</div>')
@@ -559,7 +595,7 @@ def run_simulation(duration_hours, time_label):
         st.write("#### Folium 地図（延焼範囲）")
         st_folium(m2d, width=700, height=500)
     else:
-        # 3D 表示：延焼範囲は平面のポリゴンとして表示するため、PolygonLayer を利用
+        # 3D 表示：延焼範囲は平面のポリゴンとして表示（PolygonLayer）＋背景に DEM（TerrainLayer）
         polygon_layer = get_flat_polygon_layer(shape_coords, water_volume_tons, color_rgba)
         layers = [polygon_layer]
         if MAPBOX_TOKEN:
