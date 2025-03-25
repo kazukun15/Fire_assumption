@@ -402,16 +402,15 @@ def run_simulation(time_label):
                     else:
                         folium.Circle(location=[lat_center, lon_center], radius=r, color=color_hex, fill=True, fill_opacity=0.5).add_to(m_anim)
                     anim_placeholder.markdown("")  # 更新
-                    st_folium(m_anim, width=900, height=600)
+                    st_folium(m_anim, width=700, height=500)
                     time.sleep(0.1)
                     final_map = m_anim
                 except Exception as e:
                     st.error(f"アニメーション中エラー: {e}")
                     break
         if final_map is not None:
-            st_folium(final_map, width=900, height=600)
+            st_folium(final_map, width=700, height=500)
     
-    # 地図表示（2D/3D）
     if display_mode == "2D":
         final_map = folium.Map(location=[lat_center, lon_center], zoom_start=13, tiles="OpenStreetMap", control_scale=True)
         folium.Marker(location=[lat_center, lon_center], icon=folium.Icon(color="red")).add_to(final_map)
@@ -462,7 +461,7 @@ def run_simulation(time_label):
     st.markdown("---")
     st.subheader("シミュレーション結果マップ")
     if display_mode == "2D":
-        st_folium(final_map, width=900, height=600)
+        st_folium(final_map, width=700, height=500)
     else:
         st.pydeck_chart(deck, key="pydeck_chart_" + str(time.time()))
     st.subheader("シミュレーションレポート")
@@ -484,11 +483,8 @@ def run_simulation(time_label):
                 zindex=1,
             )
             overlay.add_to(m_overlay)
-            st_folium(m_overlay, width=900, height=600)
+            st_folium(m_overlay, width=700, height=500)
 
-# -----------------------------
-# 気象データ取得ボタン
-# -----------------------------
 if st.button("気象データ取得"):
     weather_data = get_weather(default_lat, default_lon)
     if weather_data:
