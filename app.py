@@ -46,13 +46,11 @@ if 'weather_data' not in st.session_state:
     st.session_state.weather_data = {}
 
 # --- グローバル変数の定義 ---
-# 初期の緯度・経度（例：四国付近の座標）
 default_lat = 34.257585768580554
 default_lon = 133.20449384298712
 
 # サイドバーウィジェット
 fuel_type = st.sidebar.selectbox("燃料タイプを選択してください", ["森林", "草地", "都市部"])
-# シナリオ選択（ただし、最大可能性の延焼範囲は消火活動なしとして表示）
 scenario = st.sidebar.selectbox("消火シナリオを選択してください", ["通常の消火活動あり", "消火活動なし"])
 map_style_choice = st.sidebar.selectbox("地図スタイルを選択してください", ["カラー", "ダーク"])
 if map_style_choice == "カラー":
@@ -210,7 +208,6 @@ def gemini_generate_text(prompt, api_key, model_name):
         return None, None
 
 # ----- ポリゴン生成関数 -----
-# 半円（従来の延焼パターン）
 def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_deg):
     try:
         deg_per_meter = 1.0 / 111000.0
@@ -234,7 +231,6 @@ def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_
         st.error(f"座標生成中エラー: {e}")
         return []
 
-# 扇状ポリゴン生成：指定角度（例:60度）
 def create_fan_polygon(center_lat, center_lon, radius_m, wind_direction_deg, angle=60):
     try:
         deg_per_meter = 1.0 / 111000.0
@@ -259,7 +255,6 @@ def create_fan_polygon(center_lat, center_lon, radius_m, wind_direction_deg, ang
         st.error(f"扇状ポリゴン生成中エラー: {e}")
         return []
 
-# Timestamped GeoJSON 用の Feature 生成
 def generate_timestamped_features(center_lat, center_lon, max_radius, steps, wind_direction, polygon_func):
     features = []
     base_time = time.time()
@@ -283,7 +278,7 @@ def generate_timestamped_features(center_lat, center_lon, max_radius, steps, win
 def fallback_fire_spread(points, weather, duration_hours, fuel_type):
     rep_lat, rep_lon = points[0]
     wind_speed = weather.get("windspeed", 1)
-    radius_m = 10 + wind_speed * duration_hours * 50  # 仮の式
+    radius_m = 10 + wind_speed * duration_hours * 50
     area_sqm = math.pi * radius_m**2
     water_volume_tons = area_sqm / 10000.0 * 5
     return {"radius_m": radius_m, "area_sqm": area_sqm, "water_volume_tons": water_volume_tons}
@@ -299,7 +294,6 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fu
         slope_info = "10度程度の傾斜"
         elevation_info = "標高150m程度"
         vegetation_info = "松林と草地混在"
-        
         detailed_prompt = (
             "以下の最新気象データに基づいて、火災拡大シミュレーションを実施してください。\n"
             "【条件】\n"
@@ -320,15 +314,12 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fu
         st.write("### Gemini API 生JSON応答")
         with st.expander("生JSON応答（折りたたみ）"):
             st.json(raw_json)
-        
         if not generated_text:
             raise Exception("Gemini APIから有効な応答が得られませんでした。")
-        
         prediction_json = extract_json(generated_text)
         required_keys = ["radius_m", "area_sqm", "water_volume_tons"]
         if not prediction_json or not all(key in prediction_json for key in required_keys):
             raise Exception("Gemini APIの結果が不完全です。")
-        
         return prediction_json
     except Exception as e:
         st.warning("Gemini APIによる分析が完了しなかったため、フォールバックシミュレーションを使用します。")
@@ -387,7 +378,6 @@ def suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_d
     suggestions.append(f"消火日数の目安: 約 {extinguish_days:.1f} 日")
     return ", ".join(suggestions)
 
-# get_flat_polygon_layer：get_fill_color は数値リストで返す
 def get_flat_polygon_layer(coords, water_volume, color):
     polygon_data = [{"polygon": coords}]
     layer = pdk.Layer(
@@ -426,9 +416,9 @@ def get_raincloud_data(lat, lon):
         "bounds": [[lat - 0.05, lon - 0.05], [lat + 0.05, lon + 0.05]]
     }
 
-# ----- シミュレーション実行（期間：3日間＝72時間） -----
+# ----- シミュレーション実行（72時間：3日間） -----
 def run_simulation(time_label):
-    duration_hours = 72  # 3日間
+    duration_hours = 72
     if not st.session_state.get("weather_data"):
         st.error("気象データが取得されていません。")
         return
@@ -465,14 +455,14 @@ def run_simulation(time_label):
     color_rgba = get_color_by_days(burn_days)
     color_hex = rgb_to_hex(color_rgba)
     
-    # 最大可能性の延焼範囲（消火活動なしの場合の結果）
+    # 最大可能性の延焼範囲（消火活動なし）
     if fuel_type == "森林":
         max_shape_coords = get_mountain_shape(lat_center, lon_center, radius_m)
     else:
         max_shape_coords = create_half_circle_polygon(lat_center, lon_center, radius_m,
                                                        st.session_state.weather_data.get("winddirection", 0))
     
-    # 静的シミュレーション結果は消えないようにする
+    # 静的結果は static_container に表示（消さずに残す）
     static_container = st.container()
     with static_container:
         st.subheader("シミュレーション結果 (静的表示：最大可能性の延焼範囲)")
@@ -504,23 +494,20 @@ def run_simulation(time_label):
 ---
 ### 詳細レポート
 #### 1. 地形について
-- **傾斜・標高**: 本シミュレーションでは、傾斜は約10度、標高は150m程度と仮定しています（DEMの自動取得は未実装）。
-- **植生**: 対象地域は松林と草地が混在しており、選択された燃料タイプは「{fuel_type}」です。
-- **地形の影響**: 地形の複雑さにより、火災は斜面に沿って急速に延焼する可能性があります。
-
+- 傾斜は約10度、標高は150m程度と仮定（DEMの自動取得は未実装）。
+- 対象地域は松林と草地が混在、選択された燃料タイプは「{fuel_type}」。
+- 地形の複雑さにより、火災は斜面に沿って急速に延焼する可能性あり。
 #### 2. 延焼の仕方
-- **風向と延焼**: 現在の風向は {st.session_state.weather_data.get("winddirection", "不明")} 度、風速は {st.session_state.weather_data.get("windspeed", "不明")} m/s です。これにより、火災は風下側に向かって不均一に延焼することが予測されます。
-- **延焼パターン**: 最大可能性の延焼範囲は、全方向に広がると仮定しています。
-
+- 風向 {st.session_state.weather_data.get("winddirection", "不明")} 度、風速 {st.session_state.weather_data.get("windspeed", "不明")} m/s により、火災は風下側へ不均一に延焼。
+- 最大可能性の延焼範囲は全方向に広がると仮定。
 #### 3. 可能性について
-- **リスク評価**: 延焼パターンや燃焼継続日数から、早期の消火活動の重要性が示唆されます。
-- **将来的なシナリオ**: 気象条件や地形の多様性により火災の挙動は変動するため、継続的なモニタリングと対策が必要です。
+- 早期消火の重要性、継続的なモニタリングが必要。
 """
         st.markdown("---")
         st.subheader("シミュレーションレポート")
         st.markdown(report_text)
     
-    # アニメーション表示（静的結果は消さない）
+    # アニメーション表示用のコンテナ（static_container はそのまま残す）
     anim_container = st.container()
     with anim_container:
         st.subheader("延焼範囲アニメーション (最大可能性の延焼範囲)")
@@ -598,7 +585,7 @@ st.write("## 消火活動が行われない場合のシミュレーション")
 if st.button("シミュレーション実行"):
     run_simulation("3日後")
 
-# ----- 基本地図の表示（発生地点には小さなマーカーを追加） -----
+# ----- 基本地図の表示（発生地点には小さな赤丸を追加） -----
 st.subheader("基本地図 (3D DEM表示)")
 if st.session_state.points:
     lat_center, lon_center = st.session_state.points[0]
@@ -617,7 +604,6 @@ if MAPBOX_TOKEN:
     terrain_layer = get_terrain_layer()
     if terrain_layer:
         layers.append(terrain_layer)
-# 小さな赤丸（半径50）をScatterplotLayerで表示
 marker_layer = pdk.Layer(
     "ScatterplotLayer",
     data=[{"position": [lon_center, lat_center]}],
