@@ -7,7 +7,7 @@ import json
 import math
 import re
 import pydeck as pdk
-import demjson3 as demjson  # Python3 用 demjson のフォーク
+import demjson3 as demjson  # Python3 用の demjson のフォーク
 import time
 import xml.etree.ElementTree as ET
 from shapely.geometry import Point
@@ -109,7 +109,7 @@ scenario = st.sidebar.radio("シナリオ選択", ("消火活動なし", "通常
 show_raincloud = st.sidebar.checkbox("雨雲オーバーレイ表示", value=True)
 
 # -----------------------------
-# 初期マップ（2D）表示
+# 初期マップ（2D）表示：中心は発生地点があればその最後の位置、なければ初期中心
 # -----------------------------
 st.title("火災拡大シミュレーション＆雨雲オーバーレイ")
 if st.session_state.points:
@@ -410,17 +410,14 @@ def suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_d
     suggestions.append(f"消火日数の目安: 約 {extinguish_days:.1f} 日")
     return ", ".join(suggestions)
 
-# -----------------------------
-# 3D 表示でも延焼範囲は平面で表示するために、pydeck の PolygonLayer を使用
+# 3D 表示でも延焼範囲は平面のポリゴンとして表示するための PolygonLayer
 def get_flat_polygon_layer(coords, water_volume):
-    # coords: 延焼範囲を示す座標リスト（[ [lon, lat], [lon, lat], ... ]）
-    # PolygonLayer は "polygon" というキーでデータを渡す
     polygon_data = [{"polygon": coords}]
     layer = pdk.Layer(
         "PolygonLayer",
         data=polygon_data,
         get_polygon="polygon",
-        get_fill_color="[200, 30, 30, 100]",  # 透明度を含むRGBA
+        get_fill_color="[200, 30, 30, 100]",
         pickable=True,
         auto_highlight=True,
     )
@@ -520,7 +517,7 @@ def run_simulation(duration_hours, time_label):
     else:
         shape_coords = create_half_circle_polygon(lat_center, lon_center, current_radius, wind_dir)
     
-    # 延焼範囲アニメーション（2回実行し、最終状態を保持）
+    # 延焼範囲アニメーション（2回実行、最終状態を保持）
     if st.button("延焼範囲アニメーション開始"):
         anim_placeholder = st.empty()
         final_map = None
@@ -534,7 +531,7 @@ def run_simulation(duration_hours, time_label):
                         folium.Polygon(locations=poly, color="red", fill=True, fill_opacity=0.5).add_to(m_anim)
                     else:
                         folium.Circle(location=[lat_center, lon_center], radius=r, color="red", fill=True, fill_opacity=0.5).add_to(m_anim)
-                    anim_placeholder.empty()
+                    anim_placeholder.markdown("")  # 更新用にプレースホルダーをクリア
                     st_folium(m_anim, width=700, height=500)
                     time.sleep(0.1)
                     final_map = m_anim
@@ -542,10 +539,9 @@ def run_simulation(duration_hours, time_label):
                     st.error(f"アニメーション中エラー: {e}")
                     break
         if final_map is not None:
-            anim_placeholder.empty()
             st_folium(final_map, width=700, height=500)
     
-    # 表示モード切替：2D は Folium、3D は pydeck（延焼範囲は平面の PolygonLayer で表示）
+    # 表示モード切替（延焼範囲は平面のポリゴンとして表示）
     if display_mode == "2D":
         m2d = folium.Map(location=[lat_center, lon_center], zoom_start=13)
         folium.Marker(location=[lat_center, lon_center], popup="発火地点", icon=folium.Icon(color="red")).add_to(m2d)
@@ -557,7 +553,7 @@ def run_simulation(duration_hours, time_label):
         st.write("#### Folium 地図（延焼範囲）")
         st_folium(m2d, width=700, height=500)
     else:
-        # 3D 表示：延焼範囲は平面のポリゴンとして表示するため、PolygonLayer を利用
+        # 3D 表示でも延焼範囲は平面のポリゴンとして表示
         polygon_layer = get_flat_polygon_layer(shape_coords, water_volume_tons)
         layers = [polygon_layer]
         # DEM 表示用 TerrainLayer（Mapbox のアクセストークンがある場合）
