@@ -7,7 +7,7 @@ import json
 import math
 import re
 import pydeck as pdk
-import demjson3 as demjson  # Python3 用 demjson のフォーク
+import demjson3 as demjson
 import time
 import xml.etree.ElementTree as ET
 from shapely.geometry import Point
@@ -45,7 +45,7 @@ if 'weather_data' not in st.session_state:
     st.session_state.weather_data = {}
 
 # -----------------------------
-# verify_with_tavily 関数（グローバル定義）
+# グローバル関数：Tavily 検証（折りたたみ）
 # -----------------------------
 def verify_with_tavily(radius, wind_direction, water_volume):
     if not TAVILY_TOKEN:
@@ -107,7 +107,6 @@ with st.sidebar.expander("シミュレーション設定", expanded=True):
     scenario = st.radio("シナリオ選択", ("消火活動なし", "通常の消火活動あり"))
     display_mode = st.radio("表示モード", ("2D", "3D"))
     show_raincloud = st.checkbox("雨雲オーバーレイ表示", value=True)
-
 if st.sidebar.button("発生地点を追加"):
     if "center" in st.session_state:
         new_point = st.session_state["center"]
@@ -122,7 +121,7 @@ if st.sidebar.button("登録地点を消去"):
     st.sidebar.info("全ての発生地点を削除しました。")
 
 # -----------------------------
-# 初期マップ表示（地図は一枚、上部に配置、十字は削除）
+# 初期マップ表示（地図は一枚、上部に配置；十字は削除）
 # -----------------------------
 st.title("火災拡大シミュレーション＆雨雲オーバーレイ")
 if st.session_state.points:
@@ -258,9 +257,10 @@ def get_weather(lat, lon):
         return {}
 
 def gemini_generate_text(prompt, api_key, model_name):
-    try:
-        st.write("【Gemini送信プロンプト】")
+    # プロンプトは折りたたみ表示
+    with st.expander("Gemini送信プロンプト（折りたたみ）"):
         st.code(prompt, language="text")
+    try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
         headers = {"Content-Type": "application/json"}
         data = {"contents": [{"parts": [{"text": prompt}]}]}
@@ -333,11 +333,8 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fu
         )
         generated_text, raw_json = gemini_generate_text(detailed_prompt, api_key, model_name)
         st.write("### Gemini API 生JSON応答")
-        if raw_json:
-            with st.expander("生JSON応答 (折りたたみ)"):
-                st.json(raw_json)
-        else:
-            st.warning("Gemini APIからJSON形式の応答が得られませんでした。")
+        with st.expander("生JSON応答（折りたたみ）"):
+            st.json(raw_json)
         
         if not generated_text:
             st.error("Gemini APIから有効な応答が得られませんでした。")
@@ -345,7 +342,7 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fu
         
         prediction_json = extract_json(generated_text)
         if not prediction_json:
-            st.error("予測結果の解析に失敗しました。返されたテキストを確認してください。")
+            st.error("予測結果の解析に失敗しました。")
             st.markdown(f"`json\n{generated_text}\n`")
             return None
         
@@ -360,17 +357,8 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fu
         return None
 
 def gemini_summarize_data(json_data, api_key, model_name):
-    try:
-        json_str = json.dumps(json_data, ensure_ascii=False, indent=2)
-        summary_prompt = (
-            "以下の火災拡大シミュレーション結果をもとに、火災の拡大の様子と、"
-            "必要な消火水量および消火設備の提案を、一般の方が理解しやすい文章で説明してください。"
-        )
-        summary_text = gemini_generate_text(summary_prompt, api_key, model_name)
-        return summary_text or "要約が取得できませんでした。"
-    except Exception as e:
-        st.error(f"要約生成中エラー: {e}")
-        return "要約が取得できませんでした。"
+    # 分析を行わないので、要約は表示しません（または固定テキスト）
+    return "シミュレーション結果に基づくレポートを表示します。"
 
 def convert_json_for_map(original_json, center_lat, center_lon):
     try:
@@ -486,30 +474,27 @@ def run_simulation(time_label):
         area_ha = "不明"
     water_volume_tons = result.get("water_volume_tons", "不明")
     
-    # 地図の中心は発生地点の最初の位置
+    # 地図の中心は最初の発生地点
     lat_center, lon_center = st.session_state.points[0]
-    # 燃焼継続日数に応じた色（duration_hours/24）
     burn_days = duration_hours / 24
     color_rgba = get_color_by_days(burn_days)
     color_hex = rgb_to_hex(color_rgba)
     
-    # 延焼形状：燃料特性に応じた形状
+    # 延焼形状
     if fuel_type == "森林":
         shape_coords = get_mountain_shape(lat_center, lon_center, radius_m)
     else:
         shape_coords = create_half_circle_polygon(lat_center, lon_center, radius_m, st.session_state.weather_data.get("winddirection", 0))
     
-    # 地図（1枚だけ表示、延焼範囲は平面ポリゴンとして表示）
+    # 地図（1枚の地図：2D/3D に応じた表示）
     if display_mode == "2D":
         final_map = folium.Map(location=[lat_center, lon_center], zoom_start=13)
-        # 発火地点のマーカー（十字は削除）
         folium.Marker(location=[lat_center, lon_center], icon=folium.Icon(color="red")).add_to(final_map)
         if fuel_type == "森林":
             folium.Polygon(locations=shape_coords, color=color_hex, fill=True, fill_opacity=0.5).add_to(final_map)
         else:
             folium.Circle(location=[lat_center, lon_center], radius=radius_m, color=color_hex, fill=True, fill_opacity=0.5).add_to(final_map)
     else:
-        # 3D 表示：延焼範囲は平面のポリゴンとして表示（PolygonLayer）＋背景に DEM
         polygon_layer = get_flat_polygon_layer(shape_coords, water_volume_tons, color_rgba)
         layers = [polygon_layer]
         if MAPBOX_TOKEN:
@@ -527,16 +512,14 @@ def run_simulation(time_label):
         final_map = None
         deck = pdk.Deck(layers=layers, initial_view_state=view_state)
     
-    # ユーザー向けレポート（JSON 部分はすべて除去し、読みやすい文章）
-    summary_text = gemini_summarize_data(result, API_KEY, MODEL_NAME)
+    # レポート（要約は固定テキストに変更）
     report_text = f"""
 **シミュレーション結果：**
 
 - 火災拡大半径: {radius_m:.2f} m  
 - 拡大面積: {area_ha if isinstance(area_ha, str) else f'{area_ha:.2f}'} ヘクタール  
 - 必要な消火水量: {water_volume_tons} トン  
-
-【シナリオ別結果】  
+- 燃焼継続日数: {burn_days:.1f} 日（色で示す）
 """
     if scenario == "通常の消火活動あり":
         suppression_factor = 0.5
@@ -547,10 +530,11 @@ def run_simulation(time_label):
         terrain_info = "傾斜10度, 標高150m, 松林と草地混在"
         equipment_suggestions = suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_days)
         report_text += f"""
-・効果適用後の延焼半径: {effective_radius:.2f} m  
-・効果適用後の延焼面積: {effective_area_ha:.2f} ヘクタール  
-・推定消火完了日数: {extinguish_days:.1f} 日  
-・推奨消火設備: {equipment_suggestions}
+【通常の消火活動ありシナリオ】  
+- 効果適用後の延焼半径: {effective_radius:.2f} m  
+- 効果適用後の延焼面積: {effective_area_ha:.2f} ヘクタール  
+- 推定消火完了日数: {extinguish_days:.1f} 日  
+- 推奨消火設備: {equipment_suggestions}
 """
     # レイアウト：上部に地図、下部にレポート
     st.markdown("---")
@@ -561,6 +545,25 @@ def run_simulation(time_label):
         st.pydeck_chart(deck, key="pydeck_chart_" + str(time.time()))
     st.subheader("シミュレーションレポート")
     st.markdown(report_text)
+    
+    # 雨雲オーバーレイ（オプション）
+    if show_raincloud:
+        rain_data = get_raincloud_data(lat_center, lon_center)
+        if rain_data:
+            from folium.raster_layers import ImageOverlay
+            st.markdown("#### 雨雲オーバーレイ")
+            m_overlay = folium.Map(location=[lat_center, lon_center], zoom_start=13)
+            folium.Marker(location=[lat_center, lon_center], icon=folium.Icon(color="red")).add_to(m_overlay)
+            overlay = ImageOverlay(
+                image=rain_data["image_url"],
+                bounds=rain_data["bounds"],
+                opacity=0.4,
+                interactive=True,
+                cross_origin=False,
+                zindex=1,
+            )
+            overlay.add_to(m_overlay)
+            st_folium(m_overlay, width=700, height=500)
 
 # -----------------------------
 # 気象データ取得ボタン
