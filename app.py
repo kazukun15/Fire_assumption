@@ -14,7 +14,7 @@ from shapely.geometry import Point
 import geopandas as gpd
 
 # --- ページ設定 ---
-st.set_page_config(page_title="火災拡大シミュレーション (2D/3D DEM＆雨雲オーバーレイ版)", layout="wide")
+st.set_page_config(page_title="火災拡大シミュレーション (3D DEM＆雨雲オーバーレイ版)", layout="wide")
 
 # --- API設定 ---
 API_KEY = st.secrets["general"]["api_key"]
@@ -44,7 +44,7 @@ if 'points' not in st.session_state:
 if 'weather_data' not in st.session_state:
     st.session_state.weather_data = {}
 
-# --- 追加のグローバル変数の定義 ---
+# --- グローバル変数の定義 ---
 # デフォルトの緯度・経度（例：東京駅）
 default_lat = 35.681236
 default_lon = 139.767125
@@ -52,7 +52,8 @@ default_lon = 139.767125
 # サイドバーウィジェットで各パラメータを設定
 fuel_type = st.sidebar.selectbox("燃料タイプを選択してください", ["森林", "草地", "都市部"])
 scenario = st.sidebar.selectbox("消火シナリオを選択してください", ["通常の消火活動あり", "消火活動なし"])
-display_mode = st.sidebar.radio("表示モードを選択してください", ["2D", "3D"])
+# 表示モードは3D固定（DEM表示）
+display_mode = "3D"
 show_raincloud = st.sidebar.checkbox("雨雲オーバーレイを表示する", value=False)
 
 # 気象情報表示用の関数
@@ -65,7 +66,7 @@ def display_weather_info(weather_data):
     st.write(f"降水量: {weather_data.get('precipitation', '不明')} mm/h")
 
 # -----------------------------
-# extract_json 関数（必ず他の関数より先に定義）
+# extract_json 関数
 # -----------------------------
 def extract_json(text: str) -> dict:
     text = text.strip()
@@ -229,6 +230,17 @@ def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_
         st.error(f"座標生成中エラー: {e}")
         return []
 
+# フォールバックの簡易火災拡大シミュレーション
+def fallback_fire_spread(points, weather, duration_hours, fuel_type):
+    rep_lat, rep_lon = points[0]
+    wind_speed = weather.get("windspeed", 1)
+    # 簡易な計算式：基本半径10mに、風速とシミュレーション時間の影響を加味
+    radius_m = 10 + wind_speed * duration_hours * 50  # 調整係数
+    area_sqm = math.pi * radius_m**2
+    water_volume_tons = area_sqm / 10000.0 * 5  # 仮の算出式
+    return {"radius_m": radius_m, "area_sqm": area_sqm, "water_volume_tons": water_volume_tons}
+
+# 火災拡大予測（Gemini API利用、失敗時はフォールバック）
 def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fuel_type):
     try:
         rep_lat, rep_lon = points[0]
@@ -263,24 +275,17 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fu
             st.json(raw_json)
         
         if not generated_text:
-            st.error("Gemini APIから有効な応答が得られませんでした。")
-            return None
+            raise Exception("Gemini APIから有効な応答が得られませんでした。")
         
         prediction_json = extract_json(generated_text)
-        if not prediction_json:
-            st.error("予測結果の解析に失敗しました。")
-            st.markdown(f"`json\n{generated_text}\n`")
-            return None
-        
         required_keys = ["radius_m", "area_sqm", "water_volume_tons"]
-        if not all(key in prediction_json for key in required_keys):
-            st.error(f"JSONオブジェクトに必須キー {required_keys} が含まれていません。")
-            return None
+        if not prediction_json or not all(key in prediction_json for key in required_keys):
+            raise Exception("Gemini APIの結果が不完全です。")
         
         return prediction_json
     except Exception as e:
-        st.error(f"火災拡大予測中エラー: {e}")
-        return None
+        st.warning("Gemini APIによる分析が完了しなかったため、フォールバックシミュレーションを使用します。")
+        return fallback_fire_spread(points, weather, duration_hours, fuel_type)
 
 def gemini_summarize_data(json_data, api_key, model_name):
     return "シミュレーション結果に基づくレポートを表示します。"
@@ -314,7 +319,6 @@ def get_mountain_shape(center_lat, center_lon, radius_m):
         circle_coords = create_half_circle_polygon(center_lat, center_lon, radius_m, 0)
         mountain_coords = []
         for coord in circle_coords:
-            # 簡易的な変形処理（例：各座標に微小なオフセットを付与）
             lon_val, lat_val = coord
             mountain_coords.append([lon_val + 0.0005 * math.sin(lat_val), lat_val + 0.0005 * math.cos(lon_val)])
         return mountain_coords
@@ -370,17 +374,16 @@ def get_terrain_layer():
 
 # ダミーの雨雲データ取得関数（実際の実装に応じて修正してください）
 def get_raincloud_data(lat, lon):
-    # 仮のデータ例
     return {
         "image_url": "https://www.example.com/raincloud.png",
         "bounds": [[lat - 0.05, lon - 0.05], [lat + 0.05, lon + 0.05]]
     }
 
 # -----------------------------
-# シミュレーション実行（固定期間：10日＝240時間）
+# シミュレーション実行（期間：3日間＝72時間）
 # -----------------------------
 def run_simulation(time_label):
-    duration_hours = 240  # 固定：10日間
+    duration_hours = 72  # 3日間
     if not st.session_state.get("weather_data"):
         st.error("気象データが取得されていません。")
         return
@@ -441,29 +444,22 @@ def run_simulation(time_label):
         if final_map is not None:
             st_folium(final_map, width=700, height=500)
     
-    if display_mode == "2D":
-        final_map = folium.Map(location=[lat_center, lon_center], zoom_start=13, tiles="OpenStreetMap", control_scale=True)
-        folium.Marker(location=[lat_center, lon_center], icon=folium.Icon(color="red")).add_to(final_map)
-        if fuel_type == "森林":
-            folium.Polygon(locations=shape_coords, color=color_hex, fill=True, fill_opacity=0.5).add_to(final_map)
-        else:
-            folium.Circle(location=[lat_center, lon_center], radius=radius_m, color=color_hex, fill=True, fill_opacity=0.5).add_to(final_map)
-    else:
-        polygon_layer = get_flat_polygon_layer(shape_coords, water_volume_tons, color_rgba)
-        layers = [polygon_layer]
-        if MAPBOX_TOKEN:
-            terrain_layer = get_terrain_layer()
-            if terrain_layer:
-                layers.append(terrain_layer)
-        view_state = pdk.ViewState(
-            latitude=lat_center,
-            longitude=lon_center,
-            zoom=13,
-            pitch=45,
-            bearing=0,
-            mapStyle="mapbox://styles/mapbox/light-v10" if MAPBOX_TOKEN else None,
-        )
-        deck = pdk.Deck(layers=layers, initial_view_state=view_state)
+    # 3D DEM表示のためpydeckでマップを作成
+    polygon_layer = get_flat_polygon_layer(shape_coords, water_volume_tons, color_rgba)
+    layers = [polygon_layer]
+    if MAPBOX_TOKEN:
+        terrain_layer = get_terrain_layer()
+        if terrain_layer:
+            layers.append(terrain_layer)
+    view_state = pdk.ViewState(
+        latitude=lat_center,
+        longitude=lon_center,
+        zoom=13,
+        pitch=45,
+        bearing=0,
+        mapStyle="mapbox://styles/mapbox/satellite-streets-v11"
+    )
+    deck = pdk.Deck(layers=layers, initial_view_state=view_state, mapbox_key=MAPBOX_TOKEN)
     
     report_text = f"""
 **シミュレーション結果：**
@@ -489,11 +485,8 @@ def run_simulation(time_label):
 - 推奨消火設備: {equipment_suggestions}
 """
     st.markdown("---")
-    st.subheader("シミュレーション結果マップ")
-    if display_mode == "2D":
-        st_folium(final_map, width=700, height=500)
-    else:
-        st.pydeck_chart(deck, key="pydeck_chart_" + str(time.time()))
+    st.subheader("シミュレーション結果マップ (3D DEM表示)")
+    st.pydeck_chart(deck, key="pydeck_chart_" + str(time.time()))
     st.subheader("シミュレーションレポート")
     st.markdown(report_text)
     
@@ -544,4 +537,37 @@ if st.button("気象データ取得"):
 
 st.write("## 消火活動が行われない場合のシミュレーション")
 if st.button("シミュレーション実行"):
-    run_simulation("10日後")
+    run_simulation("3日後")
+
+# -----------------------------
+# アプリ起動時に最初から3D DEM付き地図を表示
+# -----------------------------
+st.subheader("基本地図 (3D DEM表示)")
+if st.session_state.points:
+    lat_center, lon_center = st.session_state.points[0]
+else:
+    lat_center, lon_center = default_lat, default_lon
+view_state = pdk.ViewState(
+    latitude=lat_center,
+    longitude=lon_center,
+    zoom=13,
+    pitch=45,
+    bearing=0,
+    mapStyle="mapbox://styles/mapbox/satellite-streets-v11"
+)
+layers = []
+if MAPBOX_TOKEN:
+    terrain_layer = get_terrain_layer()
+    if terrain_layer:
+        layers.append(terrain_layer)
+# マーカーとして発生地点を表示
+marker_layer = pdk.Layer(
+    "ScatterplotLayer",
+    data=[{"position": [lon_center, lat_center]}],
+    get_position="position",
+    get_color=[255, 0, 0],
+    get_radius=100,
+)
+layers.append(marker_layer)
+deck_map = pdk.Deck(layers=layers, initial_view_state=view_state, mapbox_key=MAPBOX_TOKEN)
+st.pydeck_chart(deck_map)
