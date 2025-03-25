@@ -51,7 +51,6 @@ default_lon = 133.20449384298712
 
 # サイドバーウィジェット
 fuel_type = st.sidebar.selectbox("燃料タイプ", ["森林", "草地", "都市部"])
-# シナリオは選択できるが、静的結果は最大可能性（消火活動なし）を表示
 scenario = st.sidebar.selectbox("消火シナリオ", ["通常の消火活動あり", "消火活動なし"])
 map_style_choice = st.sidebar.selectbox("地図スタイル", ["カラー", "ダーク"])
 if map_style_choice == "カラー":
@@ -374,7 +373,6 @@ def suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_d
     suggestions.append(f"消火日数の目安: 約 {extinguish_days:.1f} 日")
     return ", ".join(suggestions)
 
-# pydeck用レイヤー生成（ここでは静的延焼範囲のポリゴンとして利用）
 def get_flat_polygon_layer(coords, water_volume, color):
     polygon_data = [{"polygon": coords}]
     layer = pdk.Layer(
@@ -387,7 +385,6 @@ def get_flat_polygon_layer(coords, water_volume, color):
     )
     return layer
 
-# DEM（Terrain）レイヤー（pydeck用例：参考）
 def get_terrain_layer():
     if not MAPBOX_TOKEN:
         return None
@@ -453,7 +450,7 @@ def run_simulation(time_label):
     color_rgba = get_color_by_days(burn_days)
     color_hex = rgb_to_hex(color_rgba)
     
-    # 静的延焼範囲（最大可能性＝消火活動なしの結果）
+    # 静的延焼範囲（最大可能性：消火活動なしの結果）
     if fuel_type == "森林":
         static_coords = get_mountain_shape(lat_center, lon_center, radius_m)
     else:
@@ -462,19 +459,17 @@ def run_simulation(time_label):
     
     # 1. Foliumマップの生成（静的レイヤーと動的レイヤーを同じマップに追加）
     m = folium.Map(location=[lat_center, lon_center], zoom_start=13, tiles="OpenStreetMap", control_scale=True)
-    
-    # 静的レイヤー（延焼範囲ポリゴン）を追加
+    # 静的レイヤー追加
     folium.Polygon(locations=static_coords, color=color_hex, fill=True, fill_opacity=0.5,
                    tooltip="最大延焼範囲 (静的)").add_to(m)
-    # 発生地点を小さな赤丸で追加（半径5）
+    # 発生地点（小さな赤丸）
     folium.CircleMarker(location=[lat_center, lon_center], radius=5, color="red", fill=True, fill_color="red",
                         tooltip="発生地点").add_to(m)
-    
-    # 動的レイヤー用 FeatureGroup を追加
+    # 動的レイヤー用FeatureGroupを追加
     dynamic_fg = folium.FeatureGroup(name="Dynamic Animation")
     m.add_child(dynamic_fg)
     
-    # 2. 静的シミュレーション結果とレポートを表示（サイドバーなどで）
+    # 2. 静的結果とレポートの表示
     st.subheader("シミュレーション結果 (静的表示)")
     st.markdown(f"""
 **シミュレーション結果：**
@@ -490,25 +485,26 @@ def run_simulation(time_label):
    - 傾斜は約10度、標高は150m程度と仮定（DEMの自動取得はMapbox TerrainLayerで実現可能）。  
    - 対象地域は松林と草地が混在し、燃料タイプは「{fuel_type}」です。  
    - 地形の複雑さにより、火災は斜面に沿って急速に延焼する可能性があります。
-
 2. **延焼の仕方**  
-   - 風向は {st.session_state.weather_data.get("winddirection", "不明")} 度、風速は {st.session_state.weather_data.get("windspeed", "不明")} m/s により、火災は風下側へ不均一に延焼すると予測されます。  
-   - 最大可能性の延焼範囲は全方向に広がると仮定しています。
-
+   - 風向 {st.session_state.weather_data.get("winddirection", "不明")} 度、風速 {st.session_state.weather_data.get("windspeed", "不明")} m/s により、火災は風下側へ不均一に延焼。  
+   - 最大可能性の延焼範囲は全方向に広がると仮定。
 3. **可能性について**  
-   - 早期消火の重要性や、継続的なモニタリングが求められます。
+   - 早期消火の重要性、継続的なモニタリングが求められます。
 """
     st.markdown(report_text)
     
-    # 3. アニメーション表示（同じマップ上に動的レイヤーを更新）
+    # 3. アニメーション表示（同一マップを更新）
     st.subheader("延焼範囲アニメーション")
+    # ここでプレースホルダーを用意（st.empty()を使用）
+    animation_placeholder = st.empty()
     if st.button("延焼範囲アニメーション開始", key="anim_start"):
         if animation_type == "Full Circle":
             for r in range(0, int(radius_m) + 1, max(1, int(radius_m)//20)):
                 dynamic_fg._children.clear()
                 folium.Circle(location=[lat_center, lon_center], radius=r,
                               color=color_hex, fill=True, fill_opacity=0.5).add_to(dynamic_fg)
-                st_folium(m, width=700, height=500)
+                with animation_placeholder.container():
+                    st_folium(m, width=700, height=500)
                 time.sleep(0.1)
         elif animation_type == "Fan Shape":
             wind_direction = st.session_state.weather_data.get("winddirection", 0)
@@ -516,21 +512,19 @@ def run_simulation(time_label):
                 dynamic_fg._children.clear()
                 fan_coords = create_fan_polygon(lat_center, lon_center, r, wind_direction, angle=60)
                 folium.Polygon(locations=fan_coords, color=color_hex, fill=True, fill_opacity=0.5).add_to(dynamic_fg)
-                st_folium(m, width=700, height=500)
+                with animation_placeholder.container():
+                    st_folium(m, width=700, height=500)
                 time.sleep(0.1)
         elif animation_type == "Timestamped GeoJSON":
             steps = 20
             wind_direction = st.session_state.weather_data.get("winddirection", 0)
             features = generate_timestamped_features(lat_center, lon_center, radius_m, steps, wind_direction,
                                                      lambda lat, lon, r, wd: create_half_circle_polygon(lat, lon, r, 0))
-            geojson = {
-                "type": "FeatureCollection",
-                "features": features
-            }
-            # TimestampedGeoJsonはプラグインとしてマップに追加（動的レイヤーに追加）
+            geojson = {"type": "FeatureCollection", "features": features}
             dynamic_fg._children.clear()
             plugins.TimestampedGeoJson(geojson, period="PT1M", add_last_point=True, loop=True, auto_play=True).add_to(m)
-            st_folium(m, width=700, height=500)
+            with animation_placeholder.container():
+                st_folium(m, width=700, height=500)
         elif animation_type == "Color Gradient":
             steps = max(1, int(radius_m)//20)
             for i, r in enumerate(range(0, int(radius_m) + 1, steps)):
@@ -543,10 +537,11 @@ def run_simulation(time_label):
                 dynamic_fg._children.clear()
                 folium.Circle(location=[lat_center, lon_center], radius=r,
                               color=dynamic_hex, fill=True, fill_opacity=0.5).add_to(dynamic_fg)
-                st_folium(m, width=700, height=500)
+                with animation_placeholder.container():
+                    st_folium(m, width=700, height=500)
                 time.sleep(0.1)
     
-    # 4. 雨雲オーバーレイの追加（オプション）
+    # 4. 雨雲オーバーレイ（オプション）
     if show_raincloud:
         rain_data = get_raincloud_data(lat_center, lon_center)
         if rain_data:
@@ -559,7 +554,7 @@ def run_simulation(time_label):
                 zindex=1,
             ).add_to(m)
     
-    # 最後に更新したマップを表示
+    # 最終マップ表示
     st.subheader("最終地図（静的＋動的）")
     st_folium(m, width=700, height=500)
 
