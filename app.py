@@ -56,9 +56,9 @@ st_folium(base_map, width=700, height=500)
 def extract_json(text: str) -> dict:
     """
     テキストからJSONオブジェクトを抽出する関数。
-    まず直接 json.loads() を試み、失敗した場合は
+    直接 json.loads() を試み、失敗した場合は
     マークダウン形式のコードブロック（```json ... ```）または、
-    最初に現れる { ... } 部分を抽出して解析を試みます。
+    最初に現れる { ... } 部分を抽出して解析します。
     """
     text = text.strip()
     try:
@@ -276,13 +276,32 @@ def convert_json_for_map(original_json, center_lat, center_lon):
         "他のテキストは一切含まないこと。\n"
         "入力JSON:\n" + json.dumps(original_json)
     )
-    with st.spinner("座標変換中..."):
-        converted_text, raw = gemini_generate_text(prompt, API_KEY, MODEL_NAME)
-    if not converted_text:
-        st.error("座標変換用のGemini API応答が得られませんでした。")
+    try:
+        with st.spinner("座標変換中..."):
+            converted_text, raw = gemini_generate_text(prompt, API_KEY, MODEL_NAME)
+        if not converted_text:
+            st.error("座標変換用のGemini API応答が得られませんでした。")
+            return None
+        converted_json = extract_json(converted_text)
+        if not converted_json or "coordinates" not in converted_json:
+            st.error("座標変換結果が期待通りではありません。")
+            return None
+        return converted_json
+    except Exception as e:
+        st.error(f"座標変換中にエラーが発生しました: {e}")
         return None
-    converted_json = extract_json(converted_text)
-    return converted_json
+
+def verify_range_with_internet(radius_m):
+    """
+    ダミーのインターネット検索機能です。
+    実際には、Google Custom Search API や Bing Search API を利用して
+    火災拡大範囲の参考値を取得するなどの処理を実装できます。
+    ここでは、仮に 500m 〜 1000m の範囲なら妥当と判断する例です。
+    """
+    if 500 <= radius_m <= 1000:
+        return True, "予測された火災拡大半径は、一般的な参考値（500m〜1000m）内です。"
+    else:
+        return False, "予測された火災拡大半径は、一般的な参考値（500m〜1000m）から外れている可能性があります。"
 
 def run_simulation(duration_hours, time_label):
     if not st.session_state.get("weather_data"):
@@ -312,21 +331,22 @@ def run_simulation(duration_hours, time_label):
     st.write("#### 必要な消火水量")
     st.info(f"{water_volume_tons:.2f} トン")
     
-    # ユーザー向けレポート（説明文付き）
     st.markdown(f"""
-**火災拡大半径:** {radius_m:.2f} メートル  
-これは、火災が拡大する最大の距離を示しています。
+**【レポート】**
 
-**拡大面積:** {area_sqm:.2f} 平方メートル  
-この値は、火災が広がる面積を示しており、被害規模の目安となります。
-
-**必要な消火水量:** {water_volume_tons:.2f} トン  
-消火活動に必要な水量の目安です。
+- 火災拡大半径は約 **{radius_m:.2f} メートル** です。これは火災が拡大する最大の距離を示しています。
+- 拡大面積は約 **{area_sqm:.2f} 平方メートル** で、被害が及ぶ面積の目安となります。
+- 必要な消火水量は約 **{water_volume_tons:.2f} トン** と推定され、消火活動の規模の参考になります。
 """)
     
     summary_text = gemini_summarize_data(result, API_KEY, MODEL_NAME)
     st.write("#### Geminiによる要約")
     st.info(summary_text)
+    
+    # インターネット検索による確認（ダミー）
+    valid, msg = verify_range_with_internet(radius_m)
+    st.write("#### インターネット検索による確認")
+    st.info(msg)
     
     progress = st.slider("延焼進捗 (%)", 0, 100, 100, key="progress_slider")
     fraction = progress / 100.0
@@ -343,7 +363,7 @@ def run_simulation(duration_hours, time_label):
     else:
         coords = create_half_circle_polygon(lat_center, lon_center, current_radius, wind_dir)
     
-    # 2D/3D 切替
+    # 2D/3D 表示の切替
     map_mode = st.radio("表示モード", ("2D", "3D"), key="map_mode")
     
     if map_mode == "2D":
