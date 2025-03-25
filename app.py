@@ -46,8 +46,8 @@ if 'weather_data' not in st.session_state:
     st.session_state.weather_data = {}
 
 # --- グローバル変数 ---
-default_lat = 34.257585768580554
-default_lon = 133.20449384298712
+default_lat = 34.257493583590986
+default_lon = 133.20437169456872
 
 # サイドバーウィジェット
 fuel_type = st.sidebar.selectbox("燃料タイプ", ["森林", "草地", "都市部"])
@@ -102,7 +102,7 @@ def extract_json(text: str) -> dict:
     st.error("有効なJSONが見つかりませんでした。")
     return {}
 
-# ----- 以下、各種関数 -----
+# ----- 各種関数 -----
 
 def verify_with_tavily(radius, wind_direction, water_volume):
     if not TAVILY_TOKEN:
@@ -259,13 +259,8 @@ def generate_timestamped_features(center_lat, center_lon, max_radius, steps, win
         polygon_coords = polygon_func(center_lat, center_lon, current_radius, wind_direction) if polygon_func else []
         feature = {
             "type": "Feature",
-            "geometry": {
-                "type": "Polygon",
-                "coordinates": [polygon_coords]
-            },
-            "properties": {
-                "times": [t_iso]
-            }
+            "geometry": {"type": "Polygon", "coordinates": [polygon_coords]},
+            "properties": {"times": [t_iso]}
         }
         features.append(feature)
     return features
@@ -450,7 +445,7 @@ def run_simulation(time_label):
     color_rgba = get_color_by_days(burn_days)
     color_hex = rgb_to_hex(color_rgba)
     
-    # 静的延焼範囲（最大可能性：消火活動なしの結果）
+    # 静的延焼範囲（最大可能性＝消火活動なし）
     if fuel_type == "森林":
         static_coords = get_mountain_shape(lat_center, lon_center, radius_m)
     else:
@@ -459,13 +454,13 @@ def run_simulation(time_label):
     
     # 1. Foliumマップの生成（静的レイヤーと動的レイヤーを同じマップに追加）
     m = folium.Map(location=[lat_center, lon_center], zoom_start=13, tiles="OpenStreetMap", control_scale=True)
-    # 静的レイヤー追加
+    # 静的レイヤー（延焼範囲）
     folium.Polygon(locations=static_coords, color=color_hex, fill=True, fill_opacity=0.5,
                    tooltip="最大延焼範囲 (静的)").add_to(m)
     # 発生地点（小さな赤丸）
     folium.CircleMarker(location=[lat_center, lon_center], radius=5, color="red", fill=True, fill_color="red",
                         tooltip="発生地点").add_to(m)
-    # 動的レイヤー用FeatureGroupを追加
+    # 動的レイヤー用 FeatureGroup の追加
     dynamic_fg = folium.FeatureGroup(name="Dynamic Animation")
     m.add_child(dynamic_fg)
     
@@ -489,14 +484,13 @@ def run_simulation(time_label):
    - 風向 {st.session_state.weather_data.get("winddirection", "不明")} 度、風速 {st.session_state.weather_data.get("windspeed", "不明")} m/s により、火災は風下側へ不均一に延焼。  
    - 最大可能性の延焼範囲は全方向に広がると仮定。
 3. **可能性について**  
-   - 早期消火の重要性、継続的なモニタリングが求められます。
+   - 早期消火の重要性と、継続的なモニタリングが必要です。
 """
     st.markdown(report_text)
     
-    # 3. アニメーション表示（同一マップを更新）
+    # 3. アニメーション表示（同一マップ上に動的レイヤーを更新）
     st.subheader("延焼範囲アニメーション")
-    # ここでプレースホルダーを用意（st.empty()を使用）
-    animation_placeholder = st.empty()
+    animation_placeholder = st.empty()  # st.empty() でプレースホルダーを作成
     if st.button("延焼範囲アニメーション開始", key="anim_start"):
         if animation_type == "Full Circle":
             for r in range(0, int(radius_m) + 1, max(1, int(radius_m)//20)):
@@ -554,7 +548,7 @@ def run_simulation(time_label):
                 zindex=1,
             ).add_to(m)
     
-    # 最終マップ表示
+    # 最後に統合マップを再表示
     st.subheader("最終地図（静的＋動的）")
     st_folium(m, width=700, height=500)
 
