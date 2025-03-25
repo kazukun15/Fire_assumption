@@ -45,7 +45,43 @@ if 'weather_data' not in st.session_state:
     st.session_state.weather_data = {}
 
 # -----------------------------
-# グローバル関数：Tavily 検証（折りたたみ表示）
+# extract_json 関数（必ず他の関数より先に定義）
+# -----------------------------
+def extract_json(text: str) -> dict:
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    pattern_md = r"```json\s*(\{[\s\S]*?\})\s*```"
+    match = re.search(pattern_md, text)
+    if match:
+        json_str = match.group(1)
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            try:
+                return demjson.decode(json_str)
+            except Exception as e:
+                st.error(f"demjson解析失敗: {e}")
+                return {}
+    pattern = r"\{[\s\S]*\}"
+    match = re.search(pattern, text)
+    if match:
+        json_str = match.group(0)
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            try:
+                return demjson.decode(json_str)
+            except Exception as e:
+                st.error(f"demjson解析失敗: {e}")
+                return {}
+    st.error("有効なJSONが見つかりませんでした。")
+    return {}
+
+# -----------------------------
+# その他の関数定義
 # -----------------------------
 def verify_with_tavily(radius, wind_direction, water_volume):
     if not TAVILY_TOKEN:
@@ -84,8 +120,6 @@ def verify_with_tavily(radius, wind_direction, water_volume):
         st.error(f"Tavily検証中エラー: {e}")
         return ["Tavily検証中にエラーが発生しました。"]
 
-# -----------------------------
-# ヘルパー関数：燃焼日数に応じた色生成（1日→緑、10日以上→赤）
 def get_color_by_days(days):
     ratio = min(days / 10, 1)
     r = int(255 * ratio)
@@ -97,73 +131,6 @@ def rgb_to_hex(color):
     r, g, b, a = color
     return '#{:02x}{:02x}{:02x}'.format(r, g, b)
 
-# -----------------------------
-# サイドバー入力（シミュレーション設定）
-# -----------------------------
-with st.sidebar.expander("シミュレーション設定", expanded=True):
-    default_lat = st.number_input("初期中心 緯度", value=34.257586)
-    default_lon = st.number_input("初期中心 経度", value=133.204356)
-    fuel_type = st.selectbox("燃料特性", ["森林", "草地", "都市部"])
-    scenario = st.radio("シナリオ選択", ("消火活動なし", "通常の消火活動あり"))
-    display_mode = st.radio("表示モード", ("2D", "3D"))
-    show_raincloud = st.checkbox("雨雲オーバーレイ表示", value=True)
-if st.sidebar.button("発生地点を追加"):
-    if "center" in st.session_state:
-        new_point = st.session_state["center"]
-        if isinstance(new_point, dict):
-            new_point = [new_point.get("lat"), new_point.get("lng")]
-    else:
-        new_point = [default_lat, default_lon]
-    st.session_state.points.append(new_point)
-    st.sidebar.success(f"発生地点 {new_point} を追加しました。")
-if st.sidebar.button("登録地点を消去"):
-    st.session_state.points = []
-    st.sidebar.info("全ての発生地点を削除しました。")
-
-# -----------------------------
-# 初期マップ表示（地図は1枚、上部に配置；十字は削除）
-# -----------------------------
-st.title("火災拡大シミュレーション＆雨雲オーバーレイ")
-if st.session_state.points:
-    center = st.session_state.points[-1]
-else:
-    center = [default_lat, default_lon]
-if isinstance(center, dict):
-    center = [center.get("lat"), center.get("lng")]
-base_map = folium.Map(location=center, zoom_start=12)
-for point in st.session_state.points:
-    if isinstance(point, dict):
-        point = [point.get("lat"), point.get("lng")]
-    folium.Marker(location=point, icon=folium.Icon(color='red')).add_to(base_map)
-map_data = st_folium(base_map, width=700, height=500)
-if "center" in map_data:
-    st.session_state["center"] = map_data["center"]
-
-# -----------------------------
-# 気象情報日本語表示関数
-# -----------------------------
-def display_weather_info(weather):
-    try:
-        temp = weather.get("temperature", "不明")
-        wind_speed = weather.get("windspeed", "不明")
-        wind_dir = weather.get("winddirection", "不明")
-        humidity = weather.get("humidity", "不明")
-        precipitation = weather.get("precipitation", "不明")
-        info = f"""
-**現在の気象情報**  
-- 温度: {temp} °C  
-- 風速: {wind_speed} m/s  
-- 風向: {wind_dir} 度  
-- 湿度: {humidity}%  
-- 降水量: {precipitation} mm/h  
-        """
-        st.markdown(info)
-    except Exception as e:
-        st.error(f"気象情報表示中エラー: {e}")
-
-# -----------------------------
-# Open-Meteo API による気象情報取得関数
-# -----------------------------
 def get_weather_open_meteo(lat, lon):
     try:
         url = (
@@ -347,7 +314,7 @@ def suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_d
     suggestions.append(f"消火日数の目安: 約 {extinguish_days:.1f} 日")
     return ", ".join(suggestions)
 
-# 3D 表示用：延焼範囲を平面ポリゴンで表示する PolygonLayer
+# 3D 表示用：延焼範囲を平面ポリゴンとして表示する PolygonLayer
 def get_flat_polygon_layer(coords, water_volume, color):
     polygon_data = [{"polygon": coords}]
     layer = pdk.Layer(
@@ -412,7 +379,6 @@ def run_simulation(time_label):
         area_ha = "不明"
     water_volume_tons = result.get("water_volume_tons", "不明")
     
-    # 地図の中心は発生地点の最初の位置
     lat_center, lon_center = st.session_state.points[0]
     burn_days = duration_hours / 24
     color_rgba = get_color_by_days(burn_days)
@@ -423,7 +389,7 @@ def run_simulation(time_label):
     else:
         shape_coords = create_half_circle_polygon(lat_center, lon_center, radius_m, st.session_state.weather_data.get("winddirection", 0))
     
-    # アニメーション表示：延焼範囲が徐々に拡大する様子を表示
+    # アニメーション表示（延焼範囲が徐々に拡大する様子）
     if st.button("延焼範囲アニメーション開始"):
         anim_placeholder = st.empty()
         final_map = None
@@ -437,15 +403,15 @@ def run_simulation(time_label):
                         folium.Polygon(locations=poly, color=color_hex, fill=True, fill_opacity=0.5).add_to(m_anim)
                     else:
                         folium.Circle(location=[lat_center, lon_center], radius=r, color=color_hex, fill=True, fill_opacity=0.5).add_to(m_anim)
-                    anim_placeholder.markdown("")  # 更新用
-                    st_folium(m_anim, width=700, height=500)
+                    anim_placeholder.markdown("")  # 更新
+                    st_folium(m_anim, width=900, height=600)
                     time.sleep(0.1)
                     final_map = m_anim
                 except Exception as e:
                     st.error(f"アニメーション中エラー: {e}")
                     break
         if final_map is not None:
-            st_folium(final_map, width=700, height=500)
+            st_folium(final_map, width=900, height=600)
     
     # 地図表示（2D/3D 共に延焼範囲は平面ポリゴン）
     if display_mode == "2D":
@@ -498,7 +464,7 @@ def run_simulation(time_label):
     st.markdown("---")
     st.subheader("シミュレーション結果マップ")
     if display_mode == "2D":
-        st_folium(final_map, width=700, height=500)
+        st_folium(final_map, width=900, height=600)
     else:
         st.pydeck_chart(deck, key="pydeck_chart_" + str(time.time()))
     st.subheader("シミュレーションレポート")
@@ -520,7 +486,7 @@ def run_simulation(time_label):
                 zindex=1,
             )
             overlay.add_to(m_overlay)
-            st_folium(m_overlay, width=700, height=500)
+            st_folium(m_overlay, width=900, height=600)
 
 # -----------------------------
 # 気象データ取得ボタン
