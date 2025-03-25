@@ -45,7 +45,7 @@ if 'weather_data' not in st.session_state:
     st.session_state.weather_data = {}
 
 # -----------------------------
-# グローバル関数：Tavily 検証（折りたたみ）
+# グローバル関数：Tavily 検証（折りたたみ表示）
 # -----------------------------
 def verify_with_tavily(radius, wind_direction, water_volume):
     if not TAVILY_TOKEN:
@@ -107,7 +107,6 @@ with st.sidebar.expander("シミュレーション設定", expanded=True):
     scenario = st.radio("シナリオ選択", ("消火活動なし", "通常の消火活動あり"))
     display_mode = st.radio("表示モード", ("2D", "3D"))
     show_raincloud = st.checkbox("雨雲オーバーレイ表示", value=True)
-# 発生地点追加と消去
 if st.sidebar.button("発生地点を追加"):
     if "center" in st.session_state:
         new_point = st.session_state["center"]
@@ -122,7 +121,7 @@ if st.sidebar.button("登録地点を消去"):
     st.sidebar.info("全ての発生地点を削除しました。")
 
 # -----------------------------
-# 初期マップ表示（地図は一枚、上部に配置；十字は削除）
+# 初期マップ表示（地図は1枚、上部に配置；十字は削除）
 # -----------------------------
 st.title("火災拡大シミュレーション＆雨雲オーバーレイ")
 if st.session_state.points:
@@ -163,77 +162,39 @@ def display_weather_info(weather):
         st.error(f"気象情報表示中エラー: {e}")
 
 # -----------------------------
-# JMA 気象情報取得関数（東京地方の例）
+# Open-Meteo API による気象情報取得関数
 # -----------------------------
-def get_weather_jma():
+def get_weather_open_meteo(lat, lon):
     try:
-        url = "https://www.jma.go.jp/bosai/forecast/data/forecast/130000.json"
+        url = (
+            f"https://api.open-meteo.com/v1/forecast?"
+            f"latitude={lat}&longitude={lon}&current_weather=true&"
+            f"hourly=relativehumidity_2m,precipitation&timezone=auto"
+        )
         response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            # data はリストになっているので最初の要素を取得
-            forecast = data[0]
-            # timeSeries のうち、temps を持つものから温度を取得（最初の温度を例とする）
-            for series in forecast.get("timeSeries", []):
-                if "temps" in series.get("areas", [{}])[0]:
-                    temps = series["areas"][0]["temps"]
-                    temperature = temps[0] if temps else "不明"
-                    # 風速などは JMA の予報データには含まれないため、固定値または "不明"
-                    return {
-                        "temperature": temperature,
-                        "windspeed": "不明",
-                        "winddirection": "不明",
-                        "humidity": "不明",
-                        "precipitation": "不明"
-                    }
-            return {}
-        else:
-            st.error("JMA 天気予報 API の取得に失敗しました。")
-            return {}
+        st.write("Open-Meteo API ステータスコード:", response.status_code)
+        data = response.json()
+        current = data.get("current_weather", {})
+        result = {
+            "temperature": current.get("temperature", "不明"),
+            "windspeed": current.get("windspeed", "不明"),
+            "winddirection": current.get("winddirection", "不明")
+        }
+        current_time = current.get("time")
+        if current_time and "hourly" in data:
+            times = data["hourly"].get("time", [])
+            if current_time in times:
+                idx = times.index(current_time)
+                result["humidity"] = data["hourly"].get("relativehumidity_2m", ["不明"])[idx]
+                result["precipitation"] = data["hourly"].get("precipitation", ["不明"])[idx]
+        return result
     except Exception as e:
-        st.error(f"JMA 天気予報取得中エラー: {e}")
+        st.error(f"気象データ取得中エラー: {e}")
         return {}
-
-# -----------------------------
-# 既存関数群
-# -----------------------------
-def extract_json(text: str) -> dict:
-    text = text.strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    pattern_md = r"```json\s*(\{[\s\S]*?\})\s*```"
-    match = re.search(pattern_md, text)
-    if match:
-        json_str = match.group(1)
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            try:
-                return demjson.decode(json_str)
-            except Exception as e:
-                st.error(f"demjson解析失敗: {e}")
-                return {}
-    pattern = r"\{[\s\S]*\}"
-    match = re.search(pattern, text)
-    if match:
-        json_str = match.group(0)
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            try:
-                return demjson.decode(json_str)
-            except Exception as e:
-                st.error(f"demjson解析失敗: {e}")
-                return {}
-    st.error("有効なJSONが見つかりませんでした。")
-    return {}
 
 @st.cache_data(show_spinner=False)
 def get_weather(lat, lon):
-    # ここでは JMA の無料天気予報 JSON を使用（東京地方 "130000" の例）
-    return get_weather_jma()
+    return get_weather_open_meteo(lat, lon)
 
 def gemini_generate_text(prompt, api_key, model_name):
     with st.expander("Gemini送信プロンプト（折りたたみ）"):
@@ -386,7 +347,7 @@ def suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_d
     suggestions.append(f"消火日数の目安: 約 {extinguish_days:.1f} 日")
     return ", ".join(suggestions)
 
-# 3D 表示用：延焼範囲は平面のポリゴンとして表示する PolygonLayer
+# 3D 表示用：延焼範囲を平面ポリゴンで表示する PolygonLayer
 def get_flat_polygon_layer(coords, water_volume, color):
     polygon_data = [{"polygon": coords}]
     layer = pdk.Layer(
@@ -421,7 +382,7 @@ def get_terrain_layer():
     return terrain_layer
 
 # -----------------------------
-# シミュレーション実行（期間は固定：10日＝240時間）
+# シミュレーション実行（固定期間：10日＝240時間）
 # -----------------------------
 def run_simulation(time_label):
     duration_hours = 240  # 固定：10日間
@@ -462,6 +423,31 @@ def run_simulation(time_label):
     else:
         shape_coords = create_half_circle_polygon(lat_center, lon_center, radius_m, st.session_state.weather_data.get("winddirection", 0))
     
+    # アニメーション表示：延焼範囲が徐々に拡大する様子を表示
+    if st.button("延焼範囲アニメーション開始"):
+        anim_placeholder = st.empty()
+        final_map = None
+        for cycle in range(2):
+            for r in range(0, int(radius_m) + 1, max(1, int(radius_m)//20)):
+                try:
+                    m_anim = folium.Map(location=[lat_center, lon_center], zoom_start=13)
+                    folium.Marker(location=[lat_center, lon_center], icon=folium.Icon(color="red")).add_to(m_anim)
+                    if fuel_type == "森林":
+                        poly = get_mountain_shape(lat_center, lon_center, r)
+                        folium.Polygon(locations=poly, color=color_hex, fill=True, fill_opacity=0.5).add_to(m_anim)
+                    else:
+                        folium.Circle(location=[lat_center, lon_center], radius=r, color=color_hex, fill=True, fill_opacity=0.5).add_to(m_anim)
+                    anim_placeholder.markdown("")  # 更新用
+                    st_folium(m_anim, width=700, height=500)
+                    time.sleep(0.1)
+                    final_map = m_anim
+                except Exception as e:
+                    st.error(f"アニメーション中エラー: {e}")
+                    break
+        if final_map is not None:
+            st_folium(final_map, width=700, height=500)
+    
+    # 地図表示（2D/3D 共に延焼範囲は平面ポリゴン）
     if display_mode == "2D":
         final_map = folium.Map(location=[lat_center, lon_center], zoom_start=13)
         folium.Marker(location=[lat_center, lon_center], icon=folium.Icon(color="red")).add_to(final_map)
@@ -486,7 +472,6 @@ def run_simulation(time_label):
         )
         deck = pdk.Deck(layers=layers, initial_view_state=view_state)
     
-    # レポート
     report_text = f"""
 **シミュレーション結果：**
 
