@@ -44,6 +44,26 @@ if 'points' not in st.session_state:
 if 'weather_data' not in st.session_state:
     st.session_state.weather_data = {}
 
+# --- 追加のグローバル変数の定義 ---
+# デフォルトの緯度・経度（例：東京駅）
+default_lat = 35.681236
+default_lon = 139.767125
+
+# サイドバーウィジェットで各パラメータを設定
+fuel_type = st.sidebar.selectbox("燃料タイプを選択してください", ["森林", "草地", "都市部"])
+scenario = st.sidebar.selectbox("消火シナリオを選択してください", ["通常の消火活動あり", "消火活動なし"])
+display_mode = st.sidebar.radio("表示モードを選択してください", ["2D", "3D"])
+show_raincloud = st.sidebar.checkbox("雨雲オーバーレイを表示する", value=False)
+
+# 気象情報表示用の関数
+def display_weather_info(weather_data):
+    st.markdown("**現在の気象情報:**")
+    st.write(f"温度: {weather_data.get('temperature', '不明')} °C")
+    st.write(f"風速: {weather_data.get('windspeed', '不明')} m/s")
+    st.write(f"風向: {weather_data.get('winddirection', '不明')} 度")
+    st.write(f"湿度: {weather_data.get('humidity', '不明')} %")
+    st.write(f"降水量: {weather_data.get('precipitation', '不明')} mm/h")
+
 # -----------------------------
 # extract_json 関数（必ず他の関数より先に定義）
 # -----------------------------
@@ -293,7 +313,9 @@ def get_mountain_shape(center_lat, center_lon, radius_m):
     try:
         circle_coords = create_half_circle_polygon(center_lat, center_lon, radius_m, 0)
         mountain_coords = []
-        for lon_val, lat_val in circle_coords:
+        for coord in circle_coords:
+            # 簡易的な変形処理（例：各座標に微小なオフセットを付与）
+            lon_val, lat_val = coord
             mountain_coords.append([lon_val + 0.0005 * math.sin(lat_val), lat_val + 0.0005 * math.cos(lon_val)])
         return mountain_coords
     except Exception as e:
@@ -345,6 +367,14 @@ def get_terrain_layer():
         getTerrainRGB=True,
     )
     return terrain_layer
+
+# ダミーの雨雲データ取得関数（実際の実装に応じて修正してください）
+def get_raincloud_data(lat, lon):
+    # 仮のデータ例
+    return {
+        "image_url": "https://www.example.com/raincloud.png",
+        "bounds": [[lat - 0.05, lon - 0.05], [lat + 0.05, lon + 0.05]]
+    }
 
 # -----------------------------
 # シミュレーション実行（固定期間：10日＝240時間）
@@ -485,6 +515,24 @@ def run_simulation(time_label):
             overlay.add_to(m_overlay)
             st_folium(m_overlay, width=700, height=500)
 
+# -----------------------------
+# サイドバーに発生地点の入力を追加
+# -----------------------------
+st.sidebar.subheader("発生地点の設定")
+lat_input = st.sidebar.text_input("緯度", value=str(default_lat))
+lon_input = st.sidebar.text_input("経度", value=str(default_lon))
+if st.sidebar.button("発生地点を設定"):
+    try:
+        lat_val = float(lat_input)
+        lon_val = float(lon_input)
+        st.session_state.points = [(lat_val, lon_val)]
+        st.success("発生地点が設定されました。")
+    except ValueError:
+        st.error("有効な数値を入力してください。")
+
+# -----------------------------
+# 気象データの取得
+# -----------------------------
 if st.button("気象データ取得"):
     weather_data = get_weather(default_lat, default_lon)
     if weather_data:
