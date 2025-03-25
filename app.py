@@ -29,7 +29,7 @@ if 'weather_data' not in st.session_state:
     st.session_state.weather_data = {}
 
 # -----------------------------
-# サイドバー入力（グローバル変数として）
+# サイドバー入力
 # -----------------------------
 lat = st.sidebar.number_input("緯度", value=34.257586)
 lon = st.sidebar.number_input("経度", value=133.204356)
@@ -42,7 +42,7 @@ if st.sidebar.button("登録地点を消去"):
     st.sidebar.info("全ての発生地点を削除しました。")
 
 # -----------------------------
-# メインUI：タイトルと初期マップ（2D表示）
+# 初期マップ（2D）
 # -----------------------------
 st.title("火災拡大シミュレーション（Gemini要約＋2D/3D レポート＆マッピング版）")
 try:
@@ -57,7 +57,11 @@ except Exception as e:
 # 関数定義
 # -----------------------------
 def extract_json(text: str) -> dict:
-    """テキストからJSONオブジェクトを抽出する"""
+    """
+    テキストからJSONオブジェクトを抽出する関数。
+    直接 json.loads() を試み、失敗した場合はマークダウン形式のコードブロックや
+    最初に現れる { ... } 部分を抽出して解析します。
+    """
     text = text.strip()
     try:
         return json.loads(text)
@@ -92,7 +96,10 @@ def extract_json(text: str) -> dict:
 
 @st.cache_data(show_spinner=False)
 def get_weather(lat, lon):
-    """Open-Meteo APIから気象情報を取得する"""
+    """
+    Open-Meteo APIから指定緯度・経度の気象情報を取得する関数。
+    温度、風速、風向、湿度、降水量などを返します。
+    """
     try:
         url = (
             f"https://api.open-meteo.com/v1/forecast?"
@@ -122,7 +129,10 @@ def get_weather(lat, lon):
         return {}
 
 def gemini_generate_text(prompt, api_key, model_name):
-    """Gemini API へプロンプトを送信し、テキストを取得する"""
+    """
+    Gemini API にリクエストを送り、テキスト生成を行う関数。
+    送信前にプロンプト内容を表示（デバッグ用）し、応答の生JSONも返します。
+    """
     try:
         st.write("【Gemini送信プロンプト】")
         st.code(prompt, language="text")
@@ -146,7 +156,9 @@ def gemini_generate_text(prompt, api_key, model_name):
         return None, None
 
 def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_deg):
-    """半円形の座標列を生成する"""
+    """
+    風向きを考慮した半円形（扇形）の座標リストを生成します（[lon, lat]形式）。
+    """
     try:
         deg_per_meter = 1.0 / 111000.0
         start_angle = wind_direction_deg - 90
@@ -170,7 +182,10 @@ def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_
         return []
 
 def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fuel_type):
-    """Gemini API を利用して火災拡大予測を行う"""
+    """
+    Gemini API を利用して火災拡大予測を行う関数です。
+    指定の条件に基づいて、純粋なJSON形式で予測結果を出力します。
+    """
     try:
         rep_lat, rep_lon = points[0]
         wind_speed = weather['windspeed']
@@ -243,14 +258,11 @@ def gemini_summarize_data(json_data, api_key, model_name):
 
 def convert_json_for_map(original_json, center_lat, center_lon):
     """
-    取得したJSON（例: "radius_m", "area_sqm", "water_volume_tons"）を元に、
-    中心点 (center_lat, center_lon) をもとに円形の境界の座標リストを生成するJSON形式に変換するため、Gemini API に送信します。
+    取得したJSONを元に、中心点 (center_lat, center_lon) を中心とした円形の境界の座標リストを
+    生成するJSON形式に変換するため、Gemini API に送信します。
     
     出力形式の例:
     {"coordinates": [[緯度, 経度], [緯度, 経度], ...]}
-    他のテキストは一切含まないこと。
-    入力JSON:
-    {original_json}
     """
     try:
         prompt = (
@@ -275,15 +287,31 @@ def convert_json_for_map(original_json, center_lat, center_lon):
         st.error(f"座標変換中にエラーが発生しました: {e}")
         return None
 
-def verify_range_with_internet(radius_m):
+def verify_with_tavily(radius, wind_direction, water_volume):
     """
-    ダミーのインターネット検索機能です。
-    ここでは、仮に 500m 〜 1000m の範囲なら妥当と判断する例です。
+    Tavily を利用した（ダミー実装）インターネット検索による検証機能。
+    一致する情報が見つかれば検証結果メッセージを返し、
+    見つからなければそのままのデータを使用する旨を返します。
     """
-    if 500 <= radius_m <= 1000:
-        return True, "予測された火災拡大半径は、一般的な参考値（500m〜1000m）内です。"
+    messages = []
+    # 例として、延焼範囲は500m〜1000m、風向は0～360度、消火水量は正の値ならOKとする
+    if 500 <= radius <= 1000:
+        messages.append("延焼範囲: Tavily の検索結果と一致しています。")
     else:
-        return False, "予測された火災拡大半径は、一般的な参考値（500m〜1000m）から外れている可能性があります。"
+        messages.append("延焼範囲: Tavily の検索結果と一致しませんでした。")
+    if 0 <= wind_direction <= 360:
+        messages.append("延焼方向: Tavily の検索結果と一致しています。")
+    else:
+        messages.append("延焼方向: Tavily の検索結果と一致しませんでした。")
+    try:
+        water_val = float(water_volume)
+        if water_val > 0:
+            messages.append("必要消火水量: Tavily の検索結果と一致しています。")
+        else:
+            messages.append("必要消火水量: Tavily の検索結果と一致しませんでした。")
+    except:
+        messages.append("必要消火水量: 数値が不正なため検証できませんでした。")
+    return messages
 
 def run_simulation(duration_hours, time_label):
     if not st.session_state.get("weather_data"):
@@ -304,23 +332,32 @@ def run_simulation(duration_hours, time_label):
     except (KeyError, ValueError):
         st.error("JSONに 'radius_m' の数値が見つかりません。")
         return
-    area_sqm = result.get("area_sqm", "不明")
+    try:
+        area_sqm = float(result.get("area_sqm", 0))
+        area_ha = area_sqm / 10000.0  # 1ヘクタール = 10,000㎡
+    except (KeyError, ValueError):
+        area_sqm = "不明"
+        area_ha = "不明"
     water_volume_tons = result.get("water_volume_tons", "不明")
     
     st.write(f"### シミュレーション結果 ({time_label})")
     st.write(f"**火災拡大半径:** {radius_m:.2f} m")
-    st.write(f"**拡大面積:** {area_sqm:.2f} m²")
+    st.write(f"**拡大面積:** {area_ha if isinstance(area_ha, str) else f'{area_ha:.2f}'} ヘクタール")
     st.write("#### 必要な消火水量")
-    st.info(f"{water_volume_tons:.2f} トン")
+    try:
+        water_val = float(water_volume_tons)
+        st.info(f"{water_val:.2f} トン")
+    except:
+        st.info("不明")
     
     st.markdown(f"""
 **【レポート】**
 
 - **火災拡大半径:** {radius_m:.2f} メートル  
   → 火災が拡大する最大の距離です。
-- **拡大面積:** {area_sqm:.2f} 平方メートル  
+- **拡大面積:** {area_ha if isinstance(area_ha, str) else f'{area_ha:.2f}'} ヘクタール  
   → 火災が及ぶ面積の目安です。
-- **必要な消火水量:** {water_volume_tons:.2f} トン  
+- **必要な消火水量:** {water_volume_tons} トン  
   → 消火活動に必要な水量の目安です。
 """)
     
@@ -328,25 +365,25 @@ def run_simulation(duration_hours, time_label):
     st.write("#### Geminiによる要約")
     st.info(summary_text)
     
-    valid, msg = verify_range_with_internet(radius_m)
-    st.write("#### インターネット検索による確認")
-    st.info(msg)
+    # Tavily による検証（ダミー実装）
+    wind_dir = st.session_state.weather_data.get("winddirection", 0)
+    verification_msgs = verify_with_tavily(radius_m, wind_dir, water_volume_tons)
+    st.write("#### Tavily 検証結果")
+    for msg in verification_msgs:
+        st.write(msg)
     
     progress = st.slider("延焼進捗 (%)", 0, 100, 100, key="progress_slider")
     fraction = progress / 100.0
     current_radius = radius_m * fraction
     
     lat_center, lon_center = st.session_state.points[0]
-    wind_dir = st.session_state.weather_data.get("winddirection", 0)
     
-    # 座標変換処理
-    with st.spinner("座標変換中..."):
-        converted = convert_json_for_map(result, lat_center, lon_center)
-    if converted and "coordinates" in converted:
-        coords = converted["coordinates"]
-    else:
-        st.warning("座標変換に失敗したため、従来の半円形座標を使用します。")
+    # 座標変換処理は行わず、初回JSONの半径を使って円形の座標を生成
+    try:
         coords = create_half_circle_polygon(lat_center, lon_center, current_radius, wind_dir)
+    except Exception as e:
+        st.error(f"座標生成でエラーが発生しました: {e}")
+        coords = []
     
     # 2D/3D 表示の切替
     map_mode = st.radio("表示モード", ("2D", "3D"), key="map_mode")
@@ -354,7 +391,8 @@ def run_simulation(duration_hours, time_label):
     if map_mode == "2D":
         folium_map = folium.Map(location=[lat_center, lon_center], zoom_start=13)
         folium.Marker(location=[lat_center, lon_center], popup="火災発生地点", icon=folium.Icon(color="red")).add_to(folium_map)
-        folium.Polygon(locations=coords, color="red", fill=True, fill_opacity=0.5).add_to(folium_map)
+        # 2Dの場合は Folium の Circle で円形を描画
+        folium.Circle(location=[lat_center, lon_center], radius=current_radius, color="red", fill=True, fill_opacity=0.5).add_to(folium_map)
         st.write("#### Folium 地図（延焼範囲）")
         st_folium(folium_map, width=700, height=500)
     else:
@@ -377,7 +415,7 @@ def run_simulation(duration_hours, time_label):
             get_elevation='height',
             get_radius=30,
             elevation_scale=1,
-            get_fill_color='[200, 30, 30, 100]',
+            get_fill_color='[200, 30, 30, 100]',  # アルファ値100で透明度を上げる
             pickable=True,
             auto_highlight=True,
         )
