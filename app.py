@@ -8,9 +8,9 @@ import math
 import re
 import pydeck as pdk
 import demjson3 as demjson  # Python3 用の demjson のフォーク
+import time
 from shapely.geometry import Point
 import geopandas as gpd
-import time
 
 # --- ページ設定 ---
 st.set_page_config(page_title="火災拡大シミュレーション (2D/3D レポート＆マッピング版)", layout="wide")
@@ -24,7 +24,7 @@ try:
     TAVILY_TOKEN = st.secrets["tavily"]["api_key"]
 except Exception:
     TAVILY_TOKEN = None
-    st.warning("Tavily のトークンが設定されていません。Tavily検証機能は無効です。")
+    st.warning("Tavily のトークンが設定されていません。Tavily 検証機能は無効です。")
 
 # --- Gemini API の初期設定 ---
 genai.configure(api_key=API_KEY)
@@ -36,7 +36,7 @@ if 'weather_data' not in st.session_state:
     st.session_state.weather_data = {}
 
 # -----------------------------
-# verify_with_tavily 関数
+# verify_with_tavily 関数（Tavily 検証）
 # -----------------------------
 def verify_with_tavily(radius, wind_direction, water_volume):
     if not TAVILY_TOKEN:
@@ -97,7 +97,12 @@ scenario = st.sidebar.radio("シナリオ選択", ("消火活動なし", "通常
 # -----------------------------
 st.title("火災拡大シミュレーション（Gemini要約＋2D/3D レポート＆マッピング版）")
 try:
-    base_map = folium.Map(location=[lat, lon], zoom_start=12)
+    # マップ中心は、発火地点がある場合は最後に追加された点
+    if st.session_state.points:
+        center = st.session_state.points[-1]
+    else:
+        center = [lat, lon]
+    base_map = folium.Map(location=center, zoom_start=12)
     for point in st.session_state.points:
         folium.Marker(location=point, icon=folium.Icon(color='red')).add_to(base_map)
     st_folium(base_map, width=700, height=500)
@@ -145,7 +150,7 @@ def get_weather(lat, lon):
             f"latitude={lat}&longitude={lon}&current_weather=true&"
             f"hourly=relativehumidity_2m,precipitation&timezone=auto"
         )
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         st.write("Open-Meteo API ステータスコード:", response.status_code)
         data = response.json()
         current = data.get("current_weather", {})
@@ -174,7 +179,7 @@ def gemini_generate_text(prompt, api_key, model_name):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
         headers = {"Content-Type": "application/json"}
         data = {"contents": [{"parts": [{"text": prompt}]}]}
-        response = requests.post(url, headers=headers, json=data)
+        response = requests.post(url, headers=headers, json=data, timeout=15)
         st.write("Gemini API ステータスコード:", response.status_code)
         raw_json = response.json()
         if response.status_code == 200 and raw_json:
@@ -266,7 +271,7 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fu
         
         return prediction_json
     except Exception as e:
-        st.error(f"火災拡大予測中にエラーが発生しました: {e}")
+        st.error(f"火災拡大予測中エラー: {e}")
         return None
 
 def gemini_summarize_data(json_data, api_key, model_name):
@@ -281,7 +286,7 @@ def gemini_summarize_data(json_data, api_key, model_name):
         summary_text = gemini_generate_text(summary_prompt, API_KEY, model_name)
         return summary_text or "要約が取得できませんでした。"
     except Exception as e:
-        st.error(f"要約生成中にエラーが発生しました: {e}")
+        st.error(f"要約生成中エラー: {e}")
         return "要約が取得できませんでした。"
 
 def convert_json_for_map(original_json, center_lat, center_lon):
@@ -305,7 +310,7 @@ def convert_json_for_map(original_json, center_lat, center_lon):
             return None
         return converted_json
     except Exception as e:
-        st.error(f"座標変換中にエラーが発生しました: {e}")
+        st.error(f"座標変換中エラー: {e}")
         return None
 
 def suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_days):
@@ -343,7 +348,7 @@ def run_simulation(duration_hours, time_label):
         return
     try:
         area_sqm = float(result.get("area_sqm", 0))
-        area_ha = area_sqm / 10000.0  # 1ヘクタール = 10,000㎡
+        area_ha = area_sqm / 10000.0
     except (KeyError, ValueError):
         area_sqm = "不明"
         area_ha = "不明"
@@ -379,13 +384,13 @@ def run_simulation(duration_hours, time_label):
     for msg in verification_msgs:
         st.write(msg)
     
-    # 消火活動ありの場合の追加計算
+    # シナリオに応じた計算
     if scenario == "通常の消火活動あり":
-        suppression_factor = 0.5  # 50%の抑制効果を仮定
+        suppression_factor = 0.5
         effective_radius = radius_m * suppression_factor
         effective_area = math.pi * (effective_radius ** 2)
         effective_area_ha = effective_area / 10000.0
-        extinguish_days = effective_area_ha / 20.0  # 仮に、消火能力が20ヘクタール/日とする
+        extinguish_days = effective_area_ha / 20.0
         terrain_info = "傾斜10度, 標高150m, 松林と草地混在"
         equipment_suggestions = suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_days)
         
@@ -408,20 +413,43 @@ def run_simulation(duration_hours, time_label):
     lat_center, lon_center = st.session_state.points[0]
     wind_dir = st.session_state.weather_data.get("winddirection", 0)
     
-    # 座標生成（初回JSONの "radius_m" を使用）
+    # 座標生成（初回JSONの "radius_m" から直接生成）
     try:
         coords = create_half_circle_polygon(lat_center, lon_center, current_radius, wind_dir)
     except Exception as e:
-        st.error(f"座標生成でエラーが発生しました: {e}")
+        st.error(f"座標生成エラー: {e}")
         coords = []
     
-    # 2D/3D 表示の切替
+    # アニメーション開始ボタン（押すと延焼範囲のアニメーションを2回実行）
+    if st.button("アニメーション開始"):
+        anim_placeholder = st.empty()
+        # アニメーション：0から current_radius まで、step 毎に更新（2回繰り返す）
+        for cycle in range(2):
+            for r in range(0, int(current_radius) + 1, max(1, int(current_radius)//20)):
+                try:
+                    m = folium.Map(location=[lat_center, lon_center], zoom_start=13)
+                    folium.Marker(location=[lat_center, lon_center], popup="火災発生地点", icon=folium.Icon(color="red")).add_to(m)
+                    folium.Circle(location=[lat_center, lon_center], radius=r, color="red", fill=True, fill_opacity=0.5).add_to(m)
+                    anim_placeholder.empty()
+                    st_folium(m, width=700, height=500)
+                    time.sleep(0.1)
+                except Exception as e:
+                    st.error(f"アニメーション描写中エラー: {e}")
+                    break
+        # アニメーション終了後、最終状態のマップを表示
+        final_map = folium.Map(location=[lat_center, lon_center], zoom_start=13)
+        folium.Marker(location=[lat_center, lon_center], popup="火災発生地点", icon=folium.Icon(color="red")).add_to(final_map)
+        folium.Circle(location=[lat_center, lon_center], radius=current_radius, color="red", fill=True, fill_opacity=0.5).add_to(final_map)
+        anim_placeholder.empty()
+        st_folium(final_map, width=700, height=500)
+    
+    # 表示モード切替（2D/3D）
     if display_mode == "2D":
-        folium_map = folium.Map(location=[lat_center, lon_center], zoom_start=13)
-        folium.Marker(location=[lat_center, lon_center], popup="火災発生地点", icon=folium.Icon(color="red")).add_to(folium_map)
-        folium.Circle(location=[lat_center, lon_center], radius=current_radius, color="red", fill=True, fill_opacity=0.5).add_to(folium_map)
+        m2d = folium.Map(location=[lat_center, lon_center], zoom_start=13)
+        folium.Marker(location=[lat_center, lon_center], popup="火災発生地点", icon=folium.Icon(color="red")).add_to(m2d)
+        folium.Circle(location=[lat_center, lon_center], radius=current_radius, color="red", fill=True, fill_opacity=0.5).add_to(m2d)
         st.write("#### Folium 地図（延焼範囲）")
-        st_folium(folium_map, width=700, height=500)
+        st_folium(m2d, width=700, height=500)
     else:
         col_data = []
         scale_factor = 50
