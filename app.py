@@ -51,6 +51,7 @@ default_lon = 133.20449384298712
 
 # サイドバーウィジェット
 fuel_type = st.sidebar.selectbox("燃料タイプを選択してください", ["森林", "草地", "都市部"])
+# シナリオ選択（ここでは静的結果は最大可能性＝消火活動なしの結果を表示）
 scenario = st.sidebar.selectbox("消火シナリオを選択してください", ["通常の消火活動あり", "消火活動なし"])
 map_style_choice = st.sidebar.selectbox("地図スタイルを選択してください", ["カラー", "ダーク"])
 if map_style_choice == "カラー":
@@ -378,6 +379,7 @@ def suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_d
     suggestions.append(f"消火日数の目安: 約 {extinguish_days:.1f} 日")
     return ", ".join(suggestions)
 
+# pydeck用レイヤー生成：get_fill_colorは数値リストで返す
 def get_flat_polygon_layer(coords, water_volume, color):
     polygon_data = [{"polygon": coords}]
     layer = pdk.Layer(
@@ -390,6 +392,7 @@ def get_flat_polygon_layer(coords, water_volume, color):
     )
     return layer
 
+# DEM（Terrain）レイヤーの取得：MapboxのTerrain-RGBタイルを利用
 def get_terrain_layer():
     if not MAPBOX_TOKEN:
         return None
@@ -400,9 +403,9 @@ def get_terrain_layer():
         maxZoom=15,
         meshMaxError=4,
         elevationDecoder={
-            "rScaler": 256,
-            "gScaler": 256,
-            "bScaler": 256,
+            "rScaler": 256 * 256 * 0.1,  # 約6553.6
+            "gScaler": 256 * 0.1,        # 約25.6
+            "bScaler": 0.1,
             "offset": -10000
         },
         elevationScale=1,
@@ -416,7 +419,7 @@ def get_raincloud_data(lat, lon):
         "bounds": [[lat - 0.05, lon - 0.05], [lat + 0.05, lon + 0.05]]
     }
 
-# ----- シミュレーション実行（72時間：3日間） -----
+# ----- シミュレーション実行（3日間＝72時間） -----
 def run_simulation(time_label):
     duration_hours = 72
     if not st.session_state.get("weather_data"):
@@ -455,14 +458,14 @@ def run_simulation(time_label):
     color_rgba = get_color_by_days(burn_days)
     color_hex = rgb_to_hex(color_rgba)
     
-    # 最大可能性の延焼範囲（消火活動なし）
+    # 最大可能性の延焼範囲（消火活動なしの場合）
     if fuel_type == "森林":
         max_shape_coords = get_mountain_shape(lat_center, lon_center, radius_m)
     else:
         max_shape_coords = create_half_circle_polygon(lat_center, lon_center, radius_m,
                                                        st.session_state.weather_data.get("winddirection", 0))
     
-    # 静的結果は static_container に表示（消さずに残す）
+    # 静的シミュレーション結果を表示（静的コンテナ）
     static_container = st.container()
     with static_container:
         st.subheader("シミュレーション結果 (静的表示：最大可能性の延焼範囲)")
@@ -494,8 +497,8 @@ def run_simulation(time_label):
 ---
 ### 詳細レポート
 #### 1. 地形について
-- 傾斜は約10度、標高は150m程度と仮定（DEMの自動取得は未実装）。
-- 対象地域は松林と草地が混在、選択された燃料タイプは「{fuel_type}」。
+- 傾斜は約10度、標高は150m程度と仮定（DEMの自動取得はMapboxのTerrainLayerで実現）。
+- 対象地域は松林と草地が混在し、選択された燃料タイプは「{fuel_type}」。
 - 地形の複雑さにより、火災は斜面に沿って急速に延焼する可能性あり。
 #### 2. 延焼の仕方
 - 風向 {st.session_state.weather_data.get("winddirection", "不明")} 度、風速 {st.session_state.weather_data.get("windspeed", "不明")} m/s により、火災は風下側へ不均一に延焼。
@@ -507,7 +510,7 @@ def run_simulation(time_label):
         st.subheader("シミュレーションレポート")
         st.markdown(report_text)
     
-    # アニメーション表示用のコンテナ（static_container はそのまま残す）
+    # アニメーション表示（静的結果はそのまま残す）
     anim_container = st.container()
     with anim_container:
         st.subheader("延焼範囲アニメーション (最大可能性の延焼範囲)")
@@ -585,7 +588,7 @@ st.write("## 消火活動が行われない場合のシミュレーション")
 if st.button("シミュレーション実行"):
     run_simulation("3日後")
 
-# ----- 基本地図の表示（発生地点には小さな赤丸を追加） -----
+# ----- 基本地図の表示（発生地点に小さな赤丸を追加） -----
 st.subheader("基本地図 (3D DEM表示)")
 if st.session_state.points:
     lat_center, lon_center = st.session_state.points[0]
