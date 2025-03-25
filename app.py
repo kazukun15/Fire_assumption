@@ -51,7 +51,7 @@ default_lon = 133.20449384298712
 
 # サイドバーウィジェット
 fuel_type = st.sidebar.selectbox("燃料タイプ", ["森林", "草地", "都市部"])
-# シナリオは残しますが、静的結果は最大可能性＝消火活動なしの場合
+# シナリオは選択できるが、静的結果は最大可能性（消火活動なし）を表示
 scenario = st.sidebar.selectbox("消火シナリオ", ["通常の消火活動あり", "消火活動なし"])
 map_style_choice = st.sidebar.selectbox("地図スタイル", ["カラー", "ダーク"])
 if map_style_choice == "カラー":
@@ -103,7 +103,7 @@ def extract_json(text: str) -> dict:
     st.error("有効なJSONが見つかりませんでした。")
     return {}
 
-# ----- 各種関数 -----
+# ----- 以下、各種関数 -----
 
 def verify_with_tavily(radius, wind_direction, water_volume):
     if not TAVILY_TOKEN:
@@ -126,10 +126,7 @@ def verify_with_tavily(radius, wind_direction, water_volume):
             "include_domains": [],
             "exclude_domains": []
         }
-        headers = {
-            "Authorization": f"Bearer {TAVILY_TOKEN}",
-            "Content-Type": "application/json"
-        }
+        headers = {"Authorization": f"Bearer {TAVILY_TOKEN}", "Content-Type": "application/json"}
         response = requests.post(url, json=payload, headers=headers)
         result = response.json()
         messages = []
@@ -377,7 +374,7 @@ def suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_d
     suggestions.append(f"消火日数の目安: 約 {extinguish_days:.1f} 日")
     return ", ".join(suggestions)
 
-# pydeck用レイヤー生成（DEMはpydeckではなくFoliumでの背景表示としています）
+# pydeck用レイヤー生成（ここでは静的延焼範囲のポリゴンとして利用）
 def get_flat_polygon_layer(coords, water_volume, color):
     polygon_data = [{"polygon": coords}]
     layer = pdk.Layer(
@@ -390,7 +387,7 @@ def get_flat_polygon_layer(coords, water_volume, color):
     )
     return layer
 
-# DEM（Terrain）レイヤー：pydeck用の例（参考）
+# DEM（Terrain）レイヤー（pydeck用例：参考）
 def get_terrain_layer():
     if not MAPBOX_TOKEN:
         return None
@@ -401,8 +398,8 @@ def get_terrain_layer():
         maxZoom=15,
         meshMaxError=4,
         elevationDecoder={
-            "rScaler": 256 * 256 * 0.1,  # 約6553.6
-            "gScaler": 256 * 0.1,        # 約25.6
+            "rScaler": 256 * 256 * 0.1,
+            "gScaler": 256 * 0.1,
             "bScaler": 0.1,
             "offset": -10000
         },
@@ -417,7 +414,7 @@ def get_raincloud_data(lat, lon):
         "bounds": [[lat - 0.05, lon - 0.05], [lat + 0.05, lon + 0.05]]
     }
 
-# ----- シミュレーション実行（3日間＝72時間） -----
+# ----- シミュレーション実行（72時間＝3日間） -----
 def run_simulation(time_label):
     duration_hours = 72
     if not st.session_state.get("weather_data"):
@@ -456,30 +453,29 @@ def run_simulation(time_label):
     color_rgba = get_color_by_days(burn_days)
     color_hex = rgb_to_hex(color_rgba)
     
-    # 静的な最大延焼範囲（消火活動なしの場合）
+    # 静的延焼範囲（最大可能性＝消火活動なしの結果）
     if fuel_type == "森林":
         static_coords = get_mountain_shape(lat_center, lon_center, radius_m)
     else:
         static_coords = create_half_circle_polygon(lat_center, lon_center, radius_m,
                                                     st.session_state.weather_data.get("winddirection", 0))
     
-    # 1. ベースの Folium マップを作成
+    # 1. Foliumマップの生成（静的レイヤーと動的レイヤーを同じマップに追加）
     m = folium.Map(location=[lat_center, lon_center], zoom_start=13, tiles="OpenStreetMap", control_scale=True)
     
-    # 2. 静的な結果レイヤーを追加（最大延焼範囲）
-    folium.Polygon(locations=static_coords, color=color_hex, fill=True, fill_opacity=0.5, 
+    # 静的レイヤー（延焼範囲ポリゴン）を追加
+    folium.Polygon(locations=static_coords, color=color_hex, fill=True, fill_opacity=0.5,
                    tooltip="最大延焼範囲 (静的)").add_to(m)
-    
-    # 3. 発生地点を小さな赤丸（直径50）で表示
+    # 発生地点を小さな赤丸で追加（半径5）
     folium.CircleMarker(location=[lat_center, lon_center], radius=5, color="red", fill=True, fill_color="red",
                         tooltip="発生地点").add_to(m)
     
-    # 4. 動的なレイヤー用 FeatureGroupを追加（アニメーションで更新）
+    # 動的レイヤー用 FeatureGroup を追加
     dynamic_fg = folium.FeatureGroup(name="Dynamic Animation")
     m.add_child(dynamic_fg)
     
-    # 5. 結果とレポートを表示する静的ブロック（サイドに表示など）
-    st.subheader("シミュレーション結果＆レポート (静的)")
+    # 2. 静的シミュレーション結果とレポートを表示（サイドバーなどで）
+    st.subheader("シミュレーション結果 (静的表示)")
     st.markdown(f"""
 **シミュレーション結果：**
 
@@ -488,13 +484,27 @@ def run_simulation(time_label):
 - **必要な消火水量**: {water_volume_tons} トン  
 - **燃焼継続日数**: {burn_days:.1f} 日  
 """)
+    report_text = f"""
+### 詳細レポート
+1. **地形について**  
+   - 傾斜は約10度、標高は150m程度と仮定（DEMの自動取得はMapbox TerrainLayerで実現可能）。  
+   - 対象地域は松林と草地が混在し、燃料タイプは「{fuel_type}」です。  
+   - 地形の複雑さにより、火災は斜面に沿って急速に延焼する可能性があります。
+
+2. **延焼の仕方**  
+   - 風向は {st.session_state.weather_data.get("winddirection", "不明")} 度、風速は {st.session_state.weather_data.get("windspeed", "不明")} m/s により、火災は風下側へ不均一に延焼すると予測されます。  
+   - 最大可能性の延焼範囲は全方向に広がると仮定しています。
+
+3. **可能性について**  
+   - 早期消火の重要性や、継続的なモニタリングが求められます。
+"""
+    st.markdown(report_text)
     
-    # 6. アニメーション表示：同じマップ上に動的レイヤーを更新して追加
+    # 3. アニメーション表示（同じマップ上に動的レイヤーを更新）
     st.subheader("延焼範囲アニメーション")
     if st.button("延焼範囲アニメーション開始", key="anim_start"):
         if animation_type == "Full Circle":
             for r in range(0, int(radius_m) + 1, max(1, int(radius_m)//20)):
-                # 既存の dynamic_fg をクリア
                 dynamic_fg._children.clear()
                 folium.Circle(location=[lat_center, lon_center], radius=r,
                               color=color_hex, fill=True, fill_opacity=0.5).add_to(dynamic_fg)
@@ -517,9 +527,10 @@ def run_simulation(time_label):
                 "type": "FeatureCollection",
                 "features": features
             }
-            m_ts = folium.Map(location=[lat_center, lon_center], zoom_start=13, tiles="OpenStreetMap", control_scale=True)
-            plugins.TimestampedGeoJson(geojson, period="PT1M", add_last_point=True, loop=True, auto_play=True).add_to(m_ts)
-            st_folium(m_ts, width=700, height=500)
+            # TimestampedGeoJsonはプラグインとしてマップに追加（動的レイヤーに追加）
+            dynamic_fg._children.clear()
+            plugins.TimestampedGeoJson(geojson, period="PT1M", add_last_point=True, loop=True, auto_play=True).add_to(m)
+            st_folium(m, width=700, height=500)
         elif animation_type == "Color Gradient":
             steps = max(1, int(radius_m)//20)
             for i, r in enumerate(range(0, int(radius_m) + 1, steps)):
@@ -535,7 +546,7 @@ def run_simulation(time_label):
                 st_folium(m, width=700, height=500)
                 time.sleep(0.1)
     
-    # 7. 背景地図（DEMなど）や雨雲オーバーレイの追加（任意）
+    # 4. 雨雲オーバーレイの追加（オプション）
     if show_raincloud:
         rain_data = get_raincloud_data(lat_center, lon_center)
         if rain_data:
@@ -548,7 +559,7 @@ def run_simulation(time_label):
                 zindex=1,
             ).add_to(m)
     
-    # 最後に地図全体を表示
+    # 最後に更新したマップを表示
     st.subheader("最終地図（静的＋動的）")
     st_folium(m, width=700, height=500)
 
