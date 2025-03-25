@@ -45,9 +45,9 @@ if 'weather_data' not in st.session_state:
     st.session_state.weather_data = {}
 
 # --- グローバル変数の定義 ---
-# デフォルトの緯度・経度（例：東京駅）
-default_lat = 35.681236
-default_lon = 139.767125
+# 初期の緯度・経度を指定（例：四国付近の座標）
+default_lat = 34.257585768580554
+default_lon = 133.20449384298712
 
 # サイドバーウィジェットで各パラメータを設定
 fuel_type = st.sidebar.selectbox("燃料タイプを選択してください", ["森林", "草地", "都市部"])
@@ -230,17 +230,14 @@ def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_
         st.error(f"座標生成中エラー: {e}")
         return []
 
-# フォールバックの簡易火災拡大シミュレーション
 def fallback_fire_spread(points, weather, duration_hours, fuel_type):
     rep_lat, rep_lon = points[0]
     wind_speed = weather.get("windspeed", 1)
-    # 簡易な計算式：基本半径10mに、風速とシミュレーション時間の影響を加味
     radius_m = 10 + wind_speed * duration_hours * 50  # 調整係数
     area_sqm = math.pi * radius_m**2
-    water_volume_tons = area_sqm / 10000.0 * 5  # 仮の算出式
+    water_volume_tons = area_sqm / 10000.0 * 5
     return {"radius_m": radius_m, "area_sqm": area_sqm, "water_volume_tons": water_volume_tons}
 
-# 火災拡大予測（Gemini API利用、失敗時はフォールバック）
 def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fuel_type):
     try:
         rep_lat, rep_lon = points[0]
@@ -372,16 +369,12 @@ def get_terrain_layer():
     )
     return terrain_layer
 
-# ダミーの雨雲データ取得関数（実際の実装に応じて修正してください）
 def get_raincloud_data(lat, lon):
     return {
         "image_url": "https://www.example.com/raincloud.png",
         "bounds": [[lat - 0.05, lon - 0.05], [lat + 0.05, lon + 0.05]]
     }
 
-# -----------------------------
-# シミュレーション実行（期間：3日間＝72時間）
-# -----------------------------
 def run_simulation(time_label):
     duration_hours = 72  # 3日間
     if not st.session_state.get("weather_data"):
@@ -420,7 +413,6 @@ def run_simulation(time_label):
     else:
         shape_coords = create_half_circle_polygon(lat_center, lon_center, radius_m, st.session_state.weather_data.get("winddirection", 0))
     
-    # 延焼範囲アニメーション
     if st.button("延焼範囲アニメーション開始"):
         anim_placeholder = st.empty()
         final_map = None
@@ -434,7 +426,7 @@ def run_simulation(time_label):
                         folium.Polygon(locations=poly, color=color_hex, fill=True, fill_opacity=0.5).add_to(m_anim)
                     else:
                         folium.Circle(location=[lat_center, lon_center], radius=r, color=color_hex, fill=True, fill_opacity=0.5).add_to(m_anim)
-                    anim_placeholder.markdown("")  # 更新
+                    anim_placeholder.markdown("")
                     st_folium(m_anim, width=700, height=500)
                     time.sleep(0.1)
                     final_map = m_anim
@@ -444,7 +436,6 @@ def run_simulation(time_label):
         if final_map is not None:
             st_folium(final_map, width=700, height=500)
     
-    # 3D DEM表示のため pydeck でマップを作成
     polygon_layer = get_flat_polygon_layer(shape_coords, water_volume_tons, color_rgba)
     layers = [polygon_layer]
     if MAPBOX_TOKEN:
@@ -459,7 +450,6 @@ def run_simulation(time_label):
         bearing=0,
         mapStyle="mapbox://styles/mapbox/satellite-streets-v11"
     )
-    # mapbox_key パラメータを削除して作成（pydeck のバージョン依存の問題回避）
     deck = pdk.Deck(layers=layers, initial_view_state=view_state)
     
     report_text = f"""
@@ -509,9 +499,6 @@ def run_simulation(time_label):
             overlay.add_to(m_overlay)
             st_folium(m_overlay, width=700, height=500)
 
-# -----------------------------
-# サイドバーに発生地点の入力を追加
-# -----------------------------
 st.sidebar.subheader("発生地点の設定")
 lat_input = st.sidebar.text_input("緯度", value=str(default_lat))
 lon_input = st.sidebar.text_input("経度", value=str(default_lon))
@@ -524,9 +511,6 @@ if st.sidebar.button("発生地点を設定"):
     except ValueError:
         st.error("有効な数値を入力してください。")
 
-# -----------------------------
-# 気象データの取得
-# -----------------------------
 if st.button("気象データ取得"):
     weather_data = get_weather(default_lat, default_lon)
     if weather_data:
@@ -540,9 +524,6 @@ st.write("## 消火活動が行われない場合のシミュレーション")
 if st.button("シミュレーション実行"):
     run_simulation("3日後")
 
-# -----------------------------
-# アプリ起動時に最初から3D DEM付き地図を表示
-# -----------------------------
 st.subheader("基本地図 (3D DEM表示)")
 if st.session_state.points:
     lat_center, lon_center = st.session_state.points[0]
@@ -561,7 +542,6 @@ if MAPBOX_TOKEN:
     terrain_layer = get_terrain_layer()
     if terrain_layer:
         layers.append(terrain_layer)
-# マーカーとして発生地点を表示
 marker_layer = pdk.Layer(
     "ScatterplotLayer",
     data=[{"position": [lon_center, lat_center]}],
@@ -570,6 +550,5 @@ marker_layer = pdk.Layer(
     get_radius=100,
 )
 layers.append(marker_layer)
-# mapbox_key パラメータを削除して作成
 deck_map = pdk.Deck(layers=layers, initial_view_state=view_state)
 st.pydeck_chart(deck_map)
