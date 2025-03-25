@@ -444,7 +444,7 @@ def run_simulation(time_label):
         if final_map is not None:
             st_folium(final_map, width=700, height=500)
     
-    # 3D DEM表示のためpydeckでマップを作成
+    # 3D DEM表示のため pydeck でマップを作成
     polygon_layer = get_flat_polygon_layer(shape_coords, water_volume_tons, color_rgba)
     layers = [polygon_layer]
     if MAPBOX_TOKEN:
@@ -459,7 +459,8 @@ def run_simulation(time_label):
         bearing=0,
         mapStyle="mapbox://styles/mapbox/satellite-streets-v11"
     )
-    deck = pdk.Deck(layers=layers, initial_view_state=view_state, mapbox_key=MAPBOX_TOKEN)
+    # mapbox_key パラメータを削除して作成（pydeck のバージョン依存の問題回避）
+    deck = pdk.Deck(layers=layers, initial_view_state=view_state)
     
     report_text = f"""
 **シミュレーション結果：**
@@ -569,5 +570,6 @@ marker_layer = pdk.Layer(
     get_radius=100,
 )
 layers.append(marker_layer)
-deck_map = pdk.Deck(layers=layers, initial_view_state=view_state, mapbox_key=MAPBOX_TOKEN)
+# mapbox_key パラメータを削除して作成
+deck_map = pdk.Deck(layers=layers, initial_view_state=view_state)
 st.pydeck_chart(deck_map)
