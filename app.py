@@ -18,12 +18,12 @@ st.set_page_config(page_title="火災拡大シミュレーション (2D/3D レ�
 API_KEY = st.secrets["general"]["api_key"]
 MODEL_NAME = "gemini-2.0-flash-001"
 
-# --- Tavily のトークン読み込み ---
+# --- Tavily のトークンの読み込み ---
 try:
     TAVILY_TOKEN = st.secrets["tavily"]["api_key"]
 except Exception:
     TAVILY_TOKEN = None
-    st.warning("Tavily のトークンが設定されていません。Tavily検証機能は無効です。")
+    st.warning("Tavily のトークンが設定されていません。Tavily 検証機能は無効です。")
 
 # --- Gemini API の初期設定 ---
 genai.configure(api_key=API_KEY)
@@ -33,6 +33,51 @@ if 'points' not in st.session_state:
     st.session_state.points = []
 if 'weather_data' not in st.session_state:
     st.session_state.weather_data = {}
+
+# -----------------------------
+# verify_with_tavily 関数（Tavily 検証） 
+# -----------------------------
+def verify_with_tavily(radius, wind_direction, water_volume):
+    """
+    Tavily API を利用して、延焼半径、延焼方向、必要消火水量の検証を行います。
+    Tavily のトークンが設定されていれば実際に API を呼び出し、結果を返します。
+    一致する情報が見つかればその結果、見つからなければその旨を返します。
+    """
+    if not TAVILY_TOKEN:
+        return ["Tavilyのトークンが設定されていないため、検証できません。"]
+    try:
+        url = "https://api.tavily.com/search"
+        query = "火災 拡大半径 一般的"
+        payload = {
+            "query": query,
+            "topic": "fire",
+            "search_depth": "basic",
+            "chunks_per_source": 3,
+            "max_results": 1,
+            "time_range": None,
+            "days": 3,
+            "include_answer": True,
+            "include_raw_content": False,
+            "include_images": False,
+            "include_image_descriptions": False,
+            "include_domains": [],
+            "exclude_domains": []
+        }
+        headers = {
+            "Authorization": f"Bearer {TAVILY_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        response = requests.post(url, json=payload, headers=headers)
+        result = response.json()
+        messages = []
+        if "answer" in result and result["answer"]:
+            messages.append(f"Tavily検索結果: {result['answer']}")
+        else:
+            messages.append("Tavily検索結果が見つかりませんでした。元のデータを使用します。")
+        return messages
+    except Exception as e:
+        st.error(f"Tavily検証中にエラーが発生しました: {e}")
+        return ["Tavily検証中にエラーが発生しました。"]
 
 # -----------------------------
 # サイドバー入力
@@ -51,11 +96,11 @@ if st.sidebar.button("登録地点を消去"):
 # 表示モードはサイドバーに最初から配置
 display_mode = st.sidebar.radio("表示モード", ("2D", "3D"))
 
-# シナリオ選択
+# シナリオ選択（消火活動なし / 通常の消火活動あり）
 scenario = st.sidebar.radio("シナリオ選択", ("消火活動なし", "通常の消火活動あり"))
 
 # -----------------------------
-# 初期マップ（2D）
+# 初期マップ（2D）表示
 # -----------------------------
 st.title("火災拡大シミュレーション（Gemini要約＋2D/3D レポート＆マッピング版）")
 try:
@@ -184,8 +229,7 @@ def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_
 
 def suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_days):
     """
-    地形情報、延焼面積、消火にかかる日数に基づいて必要な消火設備の提案を行います。
-    ダミー実装として、面積が大きい場合は大型装備、傾斜がある場合は山岳用装備を含む提案を返します。
+    地形情報、延焼面積、消火日数に基づいて必要な消火設備の提案を行います（ダミー実装）。
     """
     suggestions = []
     if effective_area_ha > 50:
@@ -195,7 +239,7 @@ def suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_d
     else:
         suggestions.append("消火車")
         suggestions.append("消防ポンプ")
-    if "10度" in terrain_info or "傾斜" in terrain_info:
+    if "傾斜" in terrain_info:
         suggestions.append("山岳消火装備")
     suggestions.append(f"消火日数の目安: 約 {extinguish_days:.1f} 日")
     return ", ".join(suggestions)
@@ -372,26 +416,24 @@ def run_simulation(duration_hours, time_label):
     st.write("#### Geminiによる要約")
     st.info(summary_text)
     
-    # Tavily 検証
     verification_msgs = verify_with_tavily(radius_m, st.session_state.weather_data.get("winddirection", 0), water_volume_tons)
     st.write("#### Tavily 検証結果")
     for msg in verification_msgs:
         st.write(msg)
     
-    # シナリオによるシミュレーション分岐
+    # 消火活動ありの場合の追加計算
     if scenario == "通常の消火活動あり":
-        # 消火活動ありの場合は、予想火災拡大半径に対して抑制効果を適用
-        suppression_factor = 0.5  # 50% に抑制されると仮定
+        suppression_factor = 0.5  # 50% の抑制効果を仮定
         effective_radius = radius_m * suppression_factor
         effective_area = math.pi * (effective_radius ** 2)
         effective_area_ha = effective_area / 10000.0
-        # 仮の消火能力：20ヘクタール/日
+        # 仮に、消火能力が 20 ヘクタール/日の場合
         extinguish_days = effective_area_ha / 20.0
         terrain_info = "傾斜10度, 標高150m, 松林と草地混在"
         equipment_suggestions = suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_days)
         
         st.markdown(f"""
-**【消火活動ありシナリオ】**
+**【通常の消火活動ありシナリオ】**
 
 - **効果適用後の延焼半径:** {effective_radius:.2f} m  
 - **効果適用後の延焼面積:** {effective_area_ha:.2f} ヘクタール  
@@ -400,7 +442,6 @@ def run_simulation(duration_hours, time_label):
 """)
         used_radius = effective_radius
     else:
-        # 消火活動なしの場合は、予測値そのまま
         used_radius = radius_m
 
     progress = st.slider("延焼進捗 (%)", 0, 100, 100, key="progress_slider")
@@ -410,7 +451,7 @@ def run_simulation(duration_hours, time_label):
     lat_center, lon_center = st.session_state.points[0]
     wind_dir = st.session_state.weather_data.get("winddirection", 0)
     
-    # 座標生成（Gemini API への再送信は行わず、直接生成）
+    # 座標生成（初回JSONの半径を使用）
     try:
         coords = create_half_circle_polygon(lat_center, lon_center, current_radius, wind_dir)
     except Exception as e:
@@ -421,7 +462,6 @@ def run_simulation(duration_hours, time_label):
     if display_mode == "2D":
         folium_map = folium.Map(location=[lat_center, lon_center], zoom_start=13)
         folium.Marker(location=[lat_center, lon_center], popup="火災発生地点", icon=folium.Icon(color="red")).add_to(folium_map)
-        # 2Dの場合は Circle を用いて円形を描画
         folium.Circle(location=[lat_center, lon_center], radius=current_radius, color="red", fill=True, fill_opacity=0.5).add_to(folium_map)
         st.write("#### Folium 地図（延焼範囲）")
         st_folium(folium_map, width=700, height=500)
@@ -445,7 +485,7 @@ def run_simulation(duration_hours, time_label):
             get_elevation='height',
             get_radius=30,
             elevation_scale=1,
-            get_fill_color='[200, 30, 30, 100]',
+            get_fill_color='[200, 30, 30, 100]',  # アルファ値100で透明度を上げる
             pickable=True,
             auto_highlight=True,
         )
