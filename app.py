@@ -23,7 +23,7 @@ try:
     TAVILY_TOKEN = st.secrets["tavily"]["api_key"]
 except Exception:
     TAVILY_TOKEN = None
-    st.warning("Tavily のトークンが設定されていません。Tavily 検証機能は無効です。")
+    st.warning("Tavily のトークンが設定されていません。Tavily検証機能は無効です。")
 
 # --- Gemini API の初期設定 ---
 genai.configure(api_key=API_KEY)
@@ -47,12 +47,15 @@ if st.sidebar.button("発生地点を追加"):
 if st.sidebar.button("登録地点を消去"):
     st.session_state.points = []
     st.sidebar.info("全ての発生地点を削除しました。")
-
-# 表示モードは最初からサイドバーに配置
+    
+# 表示モードはサイドバーに最初から配置
 display_mode = st.sidebar.radio("表示モード", ("2D", "3D"))
 
+# シナリオ選択
+scenario = st.sidebar.radio("シナリオ選択", ("消火活動なし", "通常の消火活動あり"))
+
 # -----------------------------
-# 初期マップ（2D）表示
+# 初期マップ（2D）
 # -----------------------------
 st.title("火災拡大シミュレーション（Gemini要約＋2D/3D レポート＆マッピング版）")
 try:
@@ -179,6 +182,24 @@ def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_
         st.error(f"座標生成中にエラーが発生しました: {e}")
         return []
 
+def suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_days):
+    """
+    地形情報、延焼面積、消火にかかる日数に基づいて必要な消火設備の提案を行います。
+    ダミー実装として、面積が大きい場合は大型装備、傾斜がある場合は山岳用装備を含む提案を返します。
+    """
+    suggestions = []
+    if effective_area_ha > 50:
+        suggestions.append("大型消火車")
+        suggestions.append("航空機")
+        suggestions.append("消火ヘリ")
+    else:
+        suggestions.append("消火車")
+        suggestions.append("消防ポンプ")
+    if "10度" in terrain_info or "傾斜" in terrain_info:
+        suggestions.append("山岳消火装備")
+    suggestions.append(f"消火日数の目安: 約 {extinguish_days:.1f} 日")
+    return ", ".join(suggestions)
+
 def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fuel_type):
     """Gemini API を利用して火災拡大予測を行う"""
     try:
@@ -282,47 +303,22 @@ def convert_json_for_map(original_json, center_lat, center_lon):
         st.error(f"座標変換中にエラーが発生しました: {e}")
         return None
 
-def verify_with_tavily(radius, wind_direction, water_volume):
+def suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_days):
     """
-    Tavily API を利用して、延焼半径、延焼方向、必要消火水量の検証を行う（ダミー実装）。
-    Tavily のトークンが設定されていれば実際に API を呼び出し、結果を返します。
-    一致する情報が見つかればその結果、見つからなければその旨を返します。
+    地形情報、延焼面積、消火日数に基づいて必要な消火設備の提案を行います（ダミー実装）。
     """
-    if not TAVILY_TOKEN:
-        return ["Tavilyのトークンが設定されていないため、検証できません。"]
-    try:
-        url = "https://api.tavily.com/search"
-        query = "火災 拡大半径 一般的"
-        payload = {
-            "query": query,
-            "topic": "fire",
-            "search_depth": "basic",
-            "chunks_per_source": 3,
-            "max_results": 1,
-            "time_range": None,
-            "days": 3,
-            "include_answer": True,
-            "include_raw_content": False,
-            "include_images": False,
-            "include_image_descriptions": False,
-            "include_domains": [],
-            "exclude_domains": []
-        }
-        headers = {
-            "Authorization": f"Bearer {TAVILY_TOKEN}",
-            "Content-Type": "application/json"
-        }
-        response = requests.post(url, json=payload, headers=headers)
-        result = response.json()
-        messages = []
-        if "answer" in result and result["answer"]:
-            messages.append(f"Tavily検索結果: {result['answer']}")
-        else:
-            messages.append("Tavily検索結果が見つかりませんでした。元のデータを使用します。")
-        return messages
-    except Exception as e:
-        st.error(f"Tavily検証中にエラーが発生しました: {e}")
-        return ["Tavily検証中にエラーが発生しました。"]
+    suggestions = []
+    if effective_area_ha > 50:
+        suggestions.append("大型消火車")
+        suggestions.append("航空機")
+        suggestions.append("消火ヘリ")
+    else:
+        suggestions.append("消火車")
+        suggestions.append("消防ポンプ")
+    if "傾斜" in terrain_info:
+        suggestions.append("山岳消火装備")
+    suggestions.append(f"消火日数の目安: 約 {extinguish_days:.1f} 日")
+    return ", ".join(suggestions)
 
 def run_simulation(duration_hours, time_label):
     if not st.session_state.get("weather_data"):
@@ -376,19 +372,45 @@ def run_simulation(duration_hours, time_label):
     st.write("#### Geminiによる要約")
     st.info(summary_text)
     
+    # Tavily 検証
     verification_msgs = verify_with_tavily(radius_m, st.session_state.weather_data.get("winddirection", 0), water_volume_tons)
     st.write("#### Tavily 検証結果")
     for msg in verification_msgs:
         st.write(msg)
     
+    # シナリオによるシミュレーション分岐
+    if scenario == "通常の消火活動あり":
+        # 消火活動ありの場合は、予想火災拡大半径に対して抑制効果を適用
+        suppression_factor = 0.5  # 50% に抑制されると仮定
+        effective_radius = radius_m * suppression_factor
+        effective_area = math.pi * (effective_radius ** 2)
+        effective_area_ha = effective_area / 10000.0
+        # 仮の消火能力：20ヘクタール/日
+        extinguish_days = effective_area_ha / 20.0
+        terrain_info = "傾斜10度, 標高150m, 松林と草地混在"
+        equipment_suggestions = suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_days)
+        
+        st.markdown(f"""
+**【消火活動ありシナリオ】**
+
+- **効果適用後の延焼半径:** {effective_radius:.2f} m  
+- **効果適用後の延焼面積:** {effective_area_ha:.2f} ヘクタール  
+- **推定消火完了日数:** {extinguish_days:.1f} 日  
+- **推奨消火設備:** {equipment_suggestions}
+""")
+        used_radius = effective_radius
+    else:
+        # 消火活動なしの場合は、予測値そのまま
+        used_radius = radius_m
+
     progress = st.slider("延焼進捗 (%)", 0, 100, 100, key="progress_slider")
     fraction = progress / 100.0
-    current_radius = radius_m * fraction
+    current_radius = used_radius * fraction
     
     lat_center, lon_center = st.session_state.points[0]
     wind_dir = st.session_state.weather_data.get("winddirection", 0)
     
-    # 座標生成（Geminiへの再送信は行わず、初回JSONの "radius_m" を使用）
+    # 座標生成（Gemini API への再送信は行わず、直接生成）
     try:
         coords = create_half_circle_polygon(lat_center, lon_center, current_radius, wind_dir)
     except Exception as e:
@@ -399,6 +421,7 @@ def run_simulation(duration_hours, time_label):
     if display_mode == "2D":
         folium_map = folium.Map(location=[lat_center, lon_center], zoom_start=13)
         folium.Marker(location=[lat_center, lon_center], popup="火災発生地点", icon=folium.Icon(color="red")).add_to(folium_map)
+        # 2Dの場合は Circle を用いて円形を描画
         folium.Circle(location=[lat_center, lon_center], radius=current_radius, color="red", fill=True, fill_opacity=0.5).add_to(folium_map)
         st.write("#### Folium 地図（延焼範囲）")
         st_folium(folium_map, width=700, height=500)
