@@ -10,6 +10,7 @@ import pydeck as pdk
 import demjson3 as demjson  # Python3 用の demjson のフォーク
 from shapely.geometry import Point
 import geopandas as gpd
+import time
 
 # --- ページ設定 ---
 st.set_page_config(page_title="火災拡大シミュレーション (2D/3D レポート＆マッピング版)", layout="wide")
@@ -18,12 +19,12 @@ st.set_page_config(page_title="火災拡大シミュレーション (2D/3D レ�
 API_KEY = st.secrets["general"]["api_key"]
 MODEL_NAME = "gemini-2.0-flash-001"
 
-# --- Tavily のトークンの読み込み ---
+# --- Tavily のトークン読み込み ---
 try:
     TAVILY_TOKEN = st.secrets["tavily"]["api_key"]
 except Exception:
     TAVILY_TOKEN = None
-    st.warning("Tavily のトークンが設定されていません。Tavily 検証機能は無効です。")
+    st.warning("Tavily のトークンが設定されていません。Tavily検証機能は無効です。")
 
 # --- Gemini API の初期設定 ---
 genai.configure(api_key=API_KEY)
@@ -35,14 +36,9 @@ if 'weather_data' not in st.session_state:
     st.session_state.weather_data = {}
 
 # -----------------------------
-# verify_with_tavily 関数（Tavily 検証） 
+# verify_with_tavily 関数
 # -----------------------------
 def verify_with_tavily(radius, wind_direction, water_volume):
-    """
-    Tavily API を利用して、延焼半径、延焼方向、必要消火水量の検証を行います。
-    Tavily のトークンが設定されていれば実際に API を呼び出し、結果を返します。
-    一致する情報が見つかればその結果、見つからなければその旨を返します。
-    """
     if not TAVILY_TOKEN:
         return ["Tavilyのトークンが設定されていないため、検証できません。"]
     try:
@@ -92,11 +88,8 @@ if st.sidebar.button("発生地点を追加"):
 if st.sidebar.button("登録地点を消去"):
     st.session_state.points = []
     st.sidebar.info("全ての発生地点を削除しました。")
-    
-# 表示モードはサイドバーに最初から配置
-display_mode = st.sidebar.radio("表示モード", ("2D", "3D"))
 
-# シナリオ選択（消火活動なし / 通常の消火活動あり）
+display_mode = st.sidebar.radio("表示モード", ("2D", "3D"))
 scenario = st.sidebar.radio("シナリオ選択", ("消火活動なし", "通常の消火活動あり"))
 
 # -----------------------------
@@ -111,11 +104,7 @@ try:
 except Exception as e:
     st.error(f"初期マップの描写でエラーが発生しました: {e}")
 
-# -----------------------------
-# 関数定義
-# -----------------------------
 def extract_json(text: str) -> dict:
-    """テキストからJSONオブジェクトを抽出する"""
     text = text.strip()
     try:
         return json.loads(text)
@@ -131,7 +120,7 @@ def extract_json(text: str) -> dict:
             try:
                 return demjson.decode(json_str)
             except Exception as e:
-                st.error(f"demjsonによるJSON解析に失敗しました: {e}")
+                st.error(f"demjson解析失敗: {e}")
                 return {}
     pattern = r"\{[\s\S]*\}"
     match = re.search(pattern, text)
@@ -143,14 +132,13 @@ def extract_json(text: str) -> dict:
             try:
                 return demjson.decode(json_str)
             except Exception as e:
-                st.error(f"demjsonによるJSON解析に失敗しました: {e}")
+                st.error(f"demjson解析失敗: {e}")
                 return {}
-    st.error("有効なJSON文字列が見つかりませんでした。")
+    st.error("有効なJSONが見つかりませんでした。")
     return {}
 
 @st.cache_data(show_spinner=False)
 def get_weather(lat, lon):
-    """Open-Meteo APIから気象情報を取得する"""
     try:
         url = (
             f"https://api.open-meteo.com/v1/forecast?"
@@ -176,11 +164,10 @@ def get_weather(lat, lon):
                 result["precipitation"] = data["hourly"].get("precipitation", [])[idx]
         return result
     except Exception as e:
-        st.error(f"気象データ取得中にエラーが発生しました: {e}")
+        st.error(f"気象データ取得中エラー: {e}")
         return {}
 
 def gemini_generate_text(prompt, api_key, model_name):
-    """Gemini APIへプロンプトを送信してテキストを取得する"""
     try:
         st.write("【Gemini送信プロンプト】")
         st.code(prompt, language="text")
@@ -200,11 +187,10 @@ def gemini_generate_text(prompt, api_key, model_name):
         else:
             return None, raw_json
     except Exception as e:
-        st.error(f"Gemini API 呼び出し中にエラーが発生しました: {e}")
+        st.error(f"Gemini API呼び出し中エラー: {e}")
         return None, None
 
 def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_deg):
-    """半円形の座標リストを生成する（[lon, lat]形式）"""
     try:
         deg_per_meter = 1.0 / 111000.0
         start_angle = wind_direction_deg - 90
@@ -224,28 +210,10 @@ def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_
             coords.append([new_lon, new_lat])
         return coords
     except Exception as e:
-        st.error(f"座標生成中にエラーが発生しました: {e}")
+        st.error(f"座標生成中エラー: {e}")
         return []
 
-def suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_days):
-    """
-    地形情報、延焼面積、消火日数に基づいて必要な消火設備の提案を行います（ダミー実装）。
-    """
-    suggestions = []
-    if effective_area_ha > 50:
-        suggestions.append("大型消火車")
-        suggestions.append("航空機")
-        suggestions.append("消火ヘリ")
-    else:
-        suggestions.append("消火車")
-        suggestions.append("消防ポンプ")
-    if "傾斜" in terrain_info:
-        suggestions.append("山岳消火装備")
-    suggestions.append(f"消火日数の目安: 約 {extinguish_days:.1f} 日")
-    return ", ".join(suggestions)
-
 def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fuel_type):
-    """Gemini API を利用して火災拡大予測を行う"""
     try:
         rep_lat, rep_lon = points[0]
         wind_speed = weather['windspeed']
@@ -317,13 +285,6 @@ def gemini_summarize_data(json_data, api_key, model_name):
         return "要約が取得できませんでした。"
 
 def convert_json_for_map(original_json, center_lat, center_lon):
-    """
-    取得したJSONを元に、中心点 (center_lat, center_lon) を中心とした円形の境界の座標リストを
-    生成するJSON形式に変換するため、Gemini API に送信します。
-    
-    出力形式の例:
-    {"coordinates": [[緯度, 経度], [緯度, 経度], ...]}
-    """
     try:
         prompt = (
             "以下のJSONは火災拡大の予測結果です。これを元に、中心点 ("
@@ -348,9 +309,6 @@ def convert_json_for_map(original_json, center_lat, center_lon):
         return None
 
 def suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_days):
-    """
-    地形情報、延焼面積、消火日数に基づいて必要な消火設備の提案を行います（ダミー実装）。
-    """
     suggestions = []
     if effective_area_ha > 50:
         suggestions.append("大型消火車")
@@ -423,12 +381,11 @@ def run_simulation(duration_hours, time_label):
     
     # 消火活動ありの場合の追加計算
     if scenario == "通常の消火活動あり":
-        suppression_factor = 0.5  # 50% の抑制効果を仮定
+        suppression_factor = 0.5  # 50%の抑制効果を仮定
         effective_radius = radius_m * suppression_factor
         effective_area = math.pi * (effective_radius ** 2)
         effective_area_ha = effective_area / 10000.0
-        # 仮に、消火能力が 20 ヘクタール/日の場合
-        extinguish_days = effective_area_ha / 20.0
+        extinguish_days = effective_area_ha / 20.0  # 仮に、消火能力が20ヘクタール/日とする
         terrain_info = "傾斜10度, 標高150m, 松林と草地混在"
         equipment_suggestions = suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_days)
         
@@ -451,14 +408,14 @@ def run_simulation(duration_hours, time_label):
     lat_center, lon_center = st.session_state.points[0]
     wind_dir = st.session_state.weather_data.get("winddirection", 0)
     
-    # 座標生成（初回JSONの半径を使用）
+    # 座標生成（初回JSONの "radius_m" を使用）
     try:
         coords = create_half_circle_polygon(lat_center, lon_center, current_radius, wind_dir)
     except Exception as e:
         st.error(f"座標生成でエラーが発生しました: {e}")
         coords = []
     
-    # 2D/3D 表示の切替（最初からサイドバーの表示モードに従う）
+    # 2D/3D 表示の切替
     if display_mode == "2D":
         folium_map = folium.Map(location=[lat_center, lon_center], zoom_start=13)
         folium.Marker(location=[lat_center, lon_center], popup="火災発生地点", icon=folium.Icon(color="red")).add_to(folium_map)
@@ -485,7 +442,7 @@ def run_simulation(duration_hours, time_label):
             get_elevation='height',
             get_radius=30,
             elevation_scale=1,
-            get_fill_color='[200, 30, 30, 100]',  # アルファ値100で透明度を上げる
+            get_fill_color='[200, 30, 30, 100]',
             pickable=True,
             auto_highlight=True,
         )
