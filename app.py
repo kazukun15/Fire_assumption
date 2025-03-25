@@ -45,7 +45,7 @@ if 'weather_data' not in st.session_state:
     st.session_state.weather_data = {}
 
 # --- グローバル変数の定義 ---
-# 初期の緯度・経度を指定（例：四国付近の座標）
+# 初期の緯度・経度（例：四国付近の座標）
 default_lat = 34.257585768580554
 default_lon = 133.20449384298712
 
@@ -337,13 +337,14 @@ def suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_d
     suggestions.append(f"消火日数の目安: 約 {extinguish_days:.1f} 日")
     return ", ".join(suggestions)
 
+# 修正ポイント: get_fill_color に文字列ではなくリストを渡す
 def get_flat_polygon_layer(coords, water_volume, color):
     polygon_data = [{"polygon": coords}]
     layer = pdk.Layer(
         "PolygonLayer",
         data=polygon_data,
         get_polygon="polygon",
-        get_fill_color=str(color),
+        get_fill_color=list(color),
         pickable=True,
         auto_highlight=True,
     )
