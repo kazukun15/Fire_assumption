@@ -394,7 +394,7 @@ def run_simulation(time_label):
         for cycle in range(2):
             for r in range(0, int(radius_m) + 1, max(1, int(radius_m)//20)):
                 try:
-                    m_anim = folium.Map(location=[lat_center, lon_center], zoom_start=13)
+                    m_anim = folium.Map(location=[lat_center, lon_center], zoom_start=13, tiles="OpenStreetMap", control_scale=True)
                     folium.Marker(location=[lat_center, lon_center], icon=folium.Icon(color="red")).add_to(m_anim)
                     if fuel_type == "森林":
                         poly = get_mountain_shape(lat_center, lon_center, r)
@@ -411,9 +411,9 @@ def run_simulation(time_label):
         if final_map is not None:
             st_folium(final_map, width=900, height=600)
     
-    # 地図表示（2D/3D 共に延焼範囲は平面ポリゴン）
+    # 地図表示（2D/3D）
     if display_mode == "2D":
-        final_map = folium.Map(location=[lat_center, lon_center], zoom_start=13)
+        final_map = folium.Map(location=[lat_center, lon_center], zoom_start=13, tiles="OpenStreetMap", control_scale=True)
         folium.Marker(location=[lat_center, lon_center], icon=folium.Icon(color="red")).add_to(final_map)
         if fuel_type == "森林":
             folium.Polygon(locations=shape_coords, color=color_hex, fill=True, fill_opacity=0.5).add_to(final_map)
@@ -473,7 +473,7 @@ def run_simulation(time_label):
         if rain_data:
             from folium.raster_layers import ImageOverlay
             st.markdown("#### 雨雲オーバーレイ")
-            m_overlay = folium.Map(location=[lat_center, lon_center], zoom_start=13)
+            m_overlay = folium.Map(location=[lat_center, lon_center], zoom_start=13, tiles="OpenStreetMap", control_scale=True)
             folium.Marker(location=[lat_center, lon_center], icon=folium.Icon(color="red")).add_to(m_overlay)
             overlay = ImageOverlay(
                 image=rain_data["image_url"],
