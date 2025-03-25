@@ -7,7 +7,7 @@ import json
 import math
 import re
 import pydeck as pdk
-import demjson3 as demjson  # Python3 用の demjson のフォーク
+import demjson3 as demjson  # Python3 用 demjson のフォーク
 import time
 import xml.etree.ElementTree as ET
 from shapely.geometry import Point
@@ -179,7 +179,7 @@ def get_raincloud_data(lat, lon):
         return None
 
 # -----------------------------
-# 既存関数（extract_json, get_weather, gemini_generate_text, create_half_circle_polygon, predict_fire_spread, gemini_summarize_data, convert_json_for_map, suggest_firefighting_equipment）
+# 既存関数（extract_json, get_weather, gemini_generate_text, create_half_circle_polygon, predict_fire_spread, gemini_summarize_data, convert_json_for_map, get_mountain_shape, suggest_firefighting_equipment）
 # -----------------------------
 def extract_json(text: str) -> dict:
     text = text.strip()
@@ -385,30 +385,6 @@ def convert_json_for_map(original_json, center_lat, center_lon):
         st.error(f"座標変換中エラー: {e}")
         return None
 
-# DEM情報を表示するための TerrainLayer（MapboxのTerrain-RGBを使用）
-def get_terrain_layer(lat, lon):
-    if not MAPBOX_TOKEN:
-        st.warning("Mapbox のアクセストークンが設定されていません。DEM 表示は無効です。")
-        return None
-    # Mapbox Terrain-RGB タイルのURLテンプレート
-    terrain_url = f"https://api.mapbox.com/v4/mapbox.terrain-rgb/{{z}}/{{x}}/{{y}}.pngraw?access_token={MAPBOX_TOKEN}"
-    terrain_layer = pdk.Layer(
-        "TerrainLayer",
-        data=terrain_url,
-        minZoom=0,
-        maxZoom=15,
-        meshMaxError=4,
-        elevationDecoder={
-            "rScaler": 256,
-            "gScaler": 256,
-            "bScaler": 256,
-            "offset": -10000
-        },
-        elevationScale=1,
-        getTerrainRGB=True,
-    )
-    return terrain_layer
-
 def get_mountain_shape(center_lat, center_lon, radius_m):
     try:
         circle_coords = create_half_circle_polygon(center_lat, center_lon, radius_m, 0)
@@ -434,6 +410,25 @@ def suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_d
     suggestions.append(f"消火日数の目安: 約 {extinguish_days:.1f} 日")
     return ", ".join(suggestions)
 
+# -----------------------------
+# 3D 表示でも延焼範囲は平面で表示するために、pydeck の PolygonLayer を使用
+def get_flat_polygon_layer(coords, water_volume):
+    # coords: 延焼範囲を示す座標リスト（[ [lon, lat], [lon, lat], ... ]）
+    # PolygonLayer は "polygon" というキーでデータを渡す
+    polygon_data = [{"polygon": coords}]
+    layer = pdk.Layer(
+        "PolygonLayer",
+        data=polygon_data,
+        get_polygon="polygon",
+        get_fill_color="[200, 30, 30, 100]",  # 透明度を含むRGBA
+        pickable=True,
+        auto_highlight=True,
+    )
+    return layer
+
+# -----------------------------
+# シミュレーション実行
+# -----------------------------
 def run_simulation(duration_hours, time_label):
     if not st.session_state.get("weather_data"):
         st.error("気象データが取得されていません。")
@@ -519,15 +514,16 @@ def run_simulation(duration_hours, time_label):
     lat_center, lon_center = st.session_state.points[0]
     wind_dir = st.session_state.weather_data.get("winddirection", 0)
     
-    # 延焼形状：燃料特性が森林の場合は山岳形状を、その他は円形
+    # 延焼形状：燃料特性が森林の場合は山岳形状、その他は円形
     if fuel_type == "森林":
         shape_coords = get_mountain_shape(lat_center, lon_center, current_radius)
     else:
         shape_coords = create_half_circle_polygon(lat_center, lon_center, current_radius, wind_dir)
     
-    # 延焼範囲アニメーション
+    # 延焼範囲アニメーション（2回実行し、最終状態を保持）
     if st.button("延焼範囲アニメーション開始"):
         anim_placeholder = st.empty()
+        final_map = None
         for cycle in range(2):
             for r in range(0, int(current_radius) + 1, max(1, int(current_radius)//20)):
                 try:
@@ -541,20 +537,15 @@ def run_simulation(duration_hours, time_label):
                     anim_placeholder.empty()
                     st_folium(m_anim, width=700, height=500)
                     time.sleep(0.1)
+                    final_map = m_anim
                 except Exception as e:
                     st.error(f"アニメーション中エラー: {e}")
                     break
-        final_map = folium.Map(location=[lat_center, lon_center], zoom_start=13)
-        folium.Marker(location=[lat_center, lon_center], popup="発火地点", icon=folium.Icon(color="red")).add_to(final_map)
-        if fuel_type == "森林":
-            final_poly = get_mountain_shape(lat_center, lon_center, current_radius)
-            folium.Polygon(locations=final_poly, color="red", fill=True, fill_opacity=0.5).add_to(final_map)
-        else:
-            folium.Circle(location=[lat_center, lon_center], radius=current_radius, color="red", fill=True, fill_opacity=0.5).add_to(final_map)
-        anim_placeholder.empty()
-        st_folium(final_map, width=700, height=500)
+        if final_map is not None:
+            anim_placeholder.empty()
+            st_folium(final_map, width=700, height=500)
     
-    # 2D/3D 表示切替
+    # 表示モード切替：2D は Folium、3D は pydeck（延焼範囲は平面の PolygonLayer で表示）
     if display_mode == "2D":
         m2d = folium.Map(location=[lat_center, lon_center], zoom_start=13)
         folium.Marker(location=[lat_center, lon_center], popup="発火地点", icon=folium.Icon(color="red")).add_to(m2d)
@@ -566,32 +557,10 @@ def run_simulation(duration_hours, time_label):
         st.write("#### Folium 地図（延焼範囲）")
         st_folium(m2d, width=700, height=500)
     else:
-        # 3D表示：pydeck で延焼範囲（列）と DEM（TerrainLayer）を重ねる
-        col_data = []
-        scale_factor = 50
-        try:
-            water_val = float(water_volume_tons)
-        except:
-            water_val = 100
-        for c in shape_coords:
-            col_data.append({
-                "lon": c[0],
-                "lat": c[1],
-                "height": water_val / scale_factor
-            })
-        column_layer = pdk.Layer(
-            "ColumnLayer",
-            data=col_data,
-            get_position='[lon, lat]',
-            get_elevation='height',
-            get_radius=30,
-            elevation_scale=1,
-            get_fill_color='[200, 30, 30, 100]',
-            pickable=True,
-            auto_highlight=True,
-        )
-        layers = [column_layer]
-        # DEM を表示するために TerrainLayer を追加（Mapbox のアクセストークンが必要）
+        # 3D 表示：延焼範囲は平面のポリゴンとして表示するため、PolygonLayer を利用
+        polygon_layer = get_flat_polygon_layer(shape_coords, water_volume_tons)
+        layers = [polygon_layer]
+        # DEM 表示用 TerrainLayer（Mapbox のアクセストークンがある場合）
         if MAPBOX_TOKEN:
             terrain_layer = pdk.Layer(
                 "TerrainLayer",
@@ -615,7 +584,6 @@ def run_simulation(duration_hours, time_label):
             zoom=13,
             pitch=45,
             bearing=0,
-            # Mapbox スタイルも指定可能（アクセストークンが必要）
             mapStyle="mapbox://styles/mapbox/light-v10" if MAPBOX_TOKEN else None,
         )
         deck = pdk.Deck(layers=layers, initial_view_state=view_state)
