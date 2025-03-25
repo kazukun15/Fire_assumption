@@ -36,54 +36,15 @@ if 'weather_data' not in st.session_state:
     st.session_state.weather_data = {}
 
 # -----------------------------
-# verify_with_tavily 関数（Tavily 検証）
-# -----------------------------
-def verify_with_tavily(radius, wind_direction, water_volume):
-    if not TAVILY_TOKEN:
-        return ["Tavilyのトークンが設定されていないため、検証できません。"]
-    try:
-        url = "https://api.tavily.com/search"
-        query = "火災 拡大半径 一般的"
-        payload = {
-            "query": query,
-            "topic": "fire",
-            "search_depth": "basic",
-            "chunks_per_source": 3,
-            "max_results": 1,
-            "time_range": None,
-            "days": 3,
-            "include_answer": True,
-            "include_raw_content": False,
-            "include_images": False,
-            "include_image_descriptions": False,
-            "include_domains": [],
-            "exclude_domains": []
-        }
-        headers = {
-            "Authorization": f"Bearer {TAVILY_TOKEN}",
-            "Content-Type": "application/json"
-        }
-        response = requests.post(url, json=payload, headers=headers)
-        result = response.json()
-        messages = []
-        if "answer" in result and result["answer"]:
-            messages.append(f"Tavily検索結果: {result['answer']}")
-        else:
-            messages.append("Tavily検索結果が見つかりませんでした。元のデータを使用します。")
-        return messages
-    except Exception as e:
-        st.error(f"Tavily検証中にエラーが発生しました: {e}")
-        return ["Tavily検証中にエラーが発生しました。"]
-
-# -----------------------------
 # サイドバー入力
 # -----------------------------
 st.sidebar.header("入力設定")
 default_lat = st.sidebar.number_input("初期中心 緯度", value=34.257586)
 default_lon = st.sidebar.number_input("初期中心 経度", value=133.204356)
 fuel_type = st.sidebar.selectbox("燃料特性", ["森林", "草地", "都市部"])
+
+# 発生地点追加：現在の地図中心（セッション変数 "center" があれば）を使用
 if st.sidebar.button("発生地点を追加"):
-    # st_folium の戻り値から中心を使う場合、セッションから取得
     if "center" in st.session_state:
         new_point = st.session_state["center"]
         if isinstance(new_point, dict):
@@ -100,19 +61,17 @@ display_mode = st.sidebar.radio("表示モード", ("2D", "3D"))
 scenario = st.sidebar.radio("シナリオ選択", ("消火活動なし", "通常の消火活動あり"))
 
 # -----------------------------
-# 初期マップ（2D）表示
+# 初期マップ（2D）表示：中心は発生地点があれば最後の点、なければ初期中心
 # -----------------------------
 st.title("火災拡大シミュレーション（Gemini要約＋2D/3D レポート＆マッピング版）")
 if st.session_state.points:
     center = st.session_state.points[-1]
 else:
     center = [default_lat, default_lon]
-# centerが辞書の場合はリストに変換
 if isinstance(center, dict):
     center = [center.get("lat"), center.get("lng")]
 base_map = folium.Map(location=center, zoom_start=12)
 for point in st.session_state.points:
-    # pointが辞書の場合はリストに変換
     if isinstance(point, dict):
         point = [point.get("lat"), point.get("lng")]
     folium.Marker(location=point, icon=folium.Icon(color='red')).add_to(base_map)
@@ -120,7 +79,29 @@ map_data = st_folium(base_map, width=700, height=500)
 if "center" in map_data:
     st.session_state["center"] = map_data["center"]
 
-# ここから下は以前のコード（気象データ取得、Gemini呼び出し、シミュレーション等）そのまま
+# 気象情報を日本語で表示する関数
+def display_weather_info(weather):
+    try:
+        temp = weather.get("temperature", "不明")
+        wind_speed = weather.get("windspeed", "不明")
+        wind_dir = weather.get("winddirection", "不明")
+        humidity = weather.get("humidity", "不明")
+        precipitation = weather.get("precipitation", "不明")
+        info = f"""
+**現在の気象情報**  
+- 温度: {temp} °C  
+- 風速: {wind_speed} m/s  
+- 風向: {wind_dir} 度  
+- 湿度: {humidity}%  
+- 降水量: {precipitation} mm/h  
+        """
+        st.markdown(info)
+    except Exception as e:
+        st.error(f"気象情報表示中エラー: {e}")
+
+# -----------------------------
+# 関数定義（extract_json, get_weather, gemini_generate_text, create_half_circle_polygon, predict_fire_spread, gemini_summarize_data, convert_json_for_map, suggest_firefighting_equipment, verify_with_tavily）
+# -----------------------------
 def extract_json(text: str) -> dict:
     text = text.strip()
     try:
@@ -230,6 +211,18 @@ def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_
         st.error(f"座標生成中エラー: {e}")
         return []
 
+# ダミー実装：山岳形状を模した延焼範囲の形状を生成
+def get_mountain_shape(center_lat, center_lon, radius_m):
+    try:
+        circle_coords = create_half_circle_polygon(center_lat, center_lon, radius_m, 0)
+        mountain_coords = []
+        for lon_val, lat_val in circle_coords:
+            mountain_coords.append([lon_val + 0.0005 * math.sin(lat_val), lat_val + 0.0005 * math.cos(lon_val)])
+        return mountain_coords
+    except Exception as e:
+        st.error(f"山岳形状生成中エラー: {e}")
+        return create_half_circle_polygon(center_lat, center_lon, radius_m, 0)
+
 def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fuel_type):
     try:
         rep_lat, rep_lon = points[0]
@@ -325,7 +318,6 @@ def convert_json_for_map(original_json, center_lat, center_lon):
         st.error(f"座標変換中エラー: {e}")
         return None
 
-# ダミー実装：山岳地形を反映した延焼範囲の形状を生成
 def get_mountain_shape(center_lat, center_lon, radius_m):
     try:
         circle_coords = create_half_circle_polygon(center_lat, center_lon, radius_m, 0)
@@ -408,7 +400,6 @@ def run_simulation(duration_hours, time_label):
     for msg in verification_msgs:
         st.write(msg)
     
-    # シナリオに応じた計算
     if scenario == "通常の消火活動あり":
         suppression_factor = 0.5
         effective_radius = radius_m * suppression_factor
@@ -437,13 +428,13 @@ def run_simulation(duration_hours, time_label):
     lat_center, lon_center = st.session_state.points[0]
     wind_dir = st.session_state.weather_data.get("winddirection", 0)
     
-    # 延焼範囲の形状：森林の場合は山岳形状を、その他は円形
+    # 延焼形状：燃料特性が森林の場合は山岳形状（ダミー実装）、それ以外は円形
     if fuel_type == "森林":
         shape_coords = get_mountain_shape(lat_center, lon_center, current_radius)
     else:
         shape_coords = create_half_circle_polygon(lat_center, lon_center, current_radius, wind_dir)
     
-    # アニメーション：延焼範囲アニメーション表示（2回繰り返し、最終状態を保持）
+    # アニメーション：延焼範囲アニメーション（2回繰り返し、最終状態を保持）
     if st.button("延焼範囲アニメーション開始"):
         anim_placeholder = st.empty()
         for cycle in range(2):
@@ -503,7 +494,7 @@ def run_simulation(duration_hours, time_label):
             get_elevation='height',
             get_radius=30,
             elevation_scale=1,
-            get_fill_color='[200, 30, 30, 100]',
+            get_fill_color='[200, 30, 30, 100]',  # 延焼範囲の3Dカラムとして表示
             pickable=True,
             auto_highlight=True,
         )
@@ -521,7 +512,7 @@ def run_simulation(duration_hours, time_label):
 # 気象データ取得ボタン
 # -----------------------------
 if st.button("気象データ取得"):
-    weather_data = get_weather(lat, lon)
+    weather_data = get_weather(default_lat, default_lon)
     if weather_data:
         st.session_state.weather_data = weather_data
         st.write("取得した気象データ（日本語表示）:")
