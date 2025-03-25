@@ -45,7 +45,7 @@ if 'weather_data' not in st.session_state:
     st.session_state.weather_data = {}
 
 # -----------------------------
-# verify_with_tavily 関数（グローバル定義）
+# グローバル関数：Tavily 検証
 # -----------------------------
 def verify_with_tavily(radius, wind_direction, water_volume):
     if not TAVILY_TOKEN:
@@ -78,16 +78,15 @@ def verify_with_tavily(radius, wind_direction, water_volume):
         if "answer" in result and result["answer"]:
             messages.append(f"Tavily検索結果: {result['answer']}")
         else:
-            messages.append("Tavily検索結果が見つかりませんでした。元のデータを使用します。")
+            messages.append("Tavily検索結果が見つかりませんでした。")
         return messages
     except Exception as e:
         st.error(f"Tavily検証中エラー: {e}")
         return ["Tavily検証中にエラーが発生しました。"]
 
 # -----------------------------
-# ヘルパー関数：燃焼日数に応じた色
+# ヘルパー関数：燃焼日数に応じた色生成（1日→緑、10日以上→赤）
 def get_color_by_days(days):
-    # 1日: 緑 (0,255,0) 〜 10日以上: 赤 (255,0,0) へのグラデーション
     ratio = min(days / 10, 1)
     r = int(255 * ratio)
     g = int(255 * (1 - ratio))
@@ -99,7 +98,8 @@ def rgb_to_hex(color):
     return '#{:02x}{:02x}{:02x}'.format(r, g, b)
 
 # -----------------------------
-# サイドバー入力（expander 内にまとめる）
+# サイドバー入力（シミュレーション設定）
+# -----------------------------
 with st.sidebar.expander("シミュレーション設定", expanded=True):
     default_lat = st.number_input("初期中心 緯度", value=34.257586)
     default_lon = st.number_input("初期中心 経度", value=133.204356)
@@ -107,7 +107,7 @@ with st.sidebar.expander("シミュレーション設定", expanded=True):
     scenario = st.radio("シナリオ選択", ("消火活動なし", "通常の消火活動あり"))
     display_mode = st.radio("表示モード", ("2D", "3D"))
     show_raincloud = st.checkbox("雨雲オーバーレイ表示", value=True)
-
+    # 期間選択は廃止（固定：10日間＝240時間）
 if st.sidebar.button("発生地点を追加"):
     if "center" in st.session_state:
         new_point = st.session_state["center"]
@@ -122,7 +122,7 @@ if st.sidebar.button("登録地点を消去"):
     st.sidebar.info("全ての発生地点を削除しました。")
 
 # -----------------------------
-# 初期マップ（2D）表示（中心に十字マーカーを追加）
+# 初期マップ表示（地図は一つ、上部に配置、中心に十字マーカーを表示）
 # -----------------------------
 st.title("火災拡大シミュレーション＆雨雲オーバーレイ")
 if st.session_state.points:
@@ -136,7 +136,7 @@ for point in st.session_state.points:
     if isinstance(point, dict):
         point = [point.get("lat"), point.get("lng")]
     folium.Marker(location=point, icon=folium.Icon(color='red')).add_to(base_map)
-# 中心に十字マーカーを追加
+# 中心に十字マーカー
 cross_icon = folium.DivIcon(html='<div style="font-size:24px; color:blue;">&#10010;</div>')
 folium.Marker(location=center, icon=cross_icon).add_to(base_map)
 map_data = st_folium(base_map, width=700, height=500)
@@ -365,13 +365,13 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fu
 def gemini_summarize_data(json_data, api_key, model_name):
     try:
         json_str = json.dumps(json_data, ensure_ascii=False, indent=2)
+        # 要約プロンプト：JSON部分は出さず、読みやすい文章にする
         summary_prompt = (
-            "あなたはデータをわかりやすく説明するアシスタントです。\n"
-            "次の火災拡大シミュレーション結果のJSONを確認し、その内容を一般の方が理解しやすい日本語で要約してください。\n"
-            "```json\n" + json_str + "\n```\n"
-            "短く簡潔な説明文でお願いします。"
+            "以下の火災拡大シミュレーション結果をもとに、"
+            "火災がどのように拡大し、必要な消火水量や消火設備の提案がどうなるか、"
+            "一般の方が理解しやすい文章で説明してください。"
         )
-        summary_text = gemini_generate_text(summary_prompt, API_KEY, model_name)
+        summary_text = gemini_generate_text(summary_prompt, api_key, model_name)
         return summary_text or "要約が取得できませんでした。"
     except Exception as e:
         st.error(f"要約生成中エラー: {e}")
@@ -433,7 +433,7 @@ def get_flat_polygon_layer(coords, water_volume, color):
         "PolygonLayer",
         data=polygon_data,
         get_polygon="polygon",
-        get_fill_color=str(color),  # RGBA 形式の文字列
+        get_fill_color=str(color),
         pickable=True,
         auto_highlight=True,
     )
@@ -461,9 +461,10 @@ def get_terrain_layer():
     return terrain_layer
 
 # -----------------------------
-# シミュレーション実行
+# シミュレーション実行（期間は固定：10日＝240時間）
 # -----------------------------
-def run_simulation(duration_hours, time_label):
+def run_simulation(time_label):
+    duration_hours = 240  # 固定：10日間
     if not st.session_state.get("weather_data"):
         st.error("気象データが取得されていません。")
         return
@@ -490,118 +491,38 @@ def run_simulation(duration_hours, time_label):
         area_ha = "不明"
     water_volume_tons = result.get("water_volume_tons", "不明")
     
-    st.write(f"### シミュレーション結果 ({time_label})")
-    st.write(f"**火災拡大半径:** {radius_m:.2f} m")
-    st.write(f"**拡大面積:** {area_ha if isinstance(area_ha, str) else f'{area_ha:.2f}'} ヘクタール")
-    st.write("#### 必要な消火水量")
-    try:
-        water_val = float(water_volume_tons)
-        st.info(f"{water_val:.2f} トン")
-    except:
-        st.info("不明")
-    
-    st.markdown(f"""
-**【レポート】**
-
-- **火災拡大半径:** {radius_m:.2f} メートル  
-  → 火災が拡大する最大の距離です。
-- **拡大面積:** {area_ha if isinstance(area_ha, str) else f'{area_ha:.2f}'} ヘクタール  
-  → 火災が及ぶ面積の目安です。
-- **必要な消火水量:** {water_volume_tons} トン  
-  → 消火活動に必要な水量の目安です。
-""")
-    
-    summary_text = gemini_summarize_data(result, API_KEY, MODEL_NAME)
-    st.write("#### Geminiによる要約")
-    st.info(summary_text)
-    
-    verification_msgs = verify_with_tavily(radius_m, st.session_state.weather_data.get("winddirection", 0), water_volume_tons)
-    st.write("#### Tavily 検証結果")
-    for msg in verification_msgs:
-        st.write(msg)
-    
-    if scenario == "通常の消火活動あり":
-        suppression_factor = 0.5
-        effective_radius = radius_m * suppression_factor
-        effective_area = math.pi * (effective_radius ** 2)
-        effective_area_ha = effective_area / 10000.0
-        extinguish_days = effective_area_ha / 20.0
-        terrain_info = "傾斜10度, 標高150m, 松林と草地混在"
-        equipment_suggestions = suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_days)
-        
-        st.markdown(f"""
-**【通常の消火活動ありシナリオ】**
-
-- **効果適用後の延焼半径:** {effective_radius:.2f} m  
-- **効果適用後の延焼面積:** {effective_area_ha:.2f} ヘクタール  
-- **推定消火完了日数:** {extinguish_days:.1f} 日  
-- **推奨消火設備:** {equipment_suggestions}
-""")
-        used_radius = effective_radius
-    else:
-        used_radius = radius_m
-
-    # 燃焼継続日数に応じた色分け（duration_hoursから日数算出）
+    # 上部に表示する地図（最終結果）
+    lat_center, lon_center = st.session_state.points[0]
+    # 燃焼継続日数に応じた色（duration_hours から日数算出）
     burn_days = duration_hours / 24
     color_rgba = get_color_by_days(burn_days)
     color_hex = rgb_to_hex(color_rgba)
-
-    current_radius = used_radius  # 延焼進捗スライダーは廃止し、全延焼範囲を表示
-
-    lat_center, lon_center = st.session_state.points[0]
-    wind_dir = st.session_state.weather_data.get("winddirection", 0)
     
+    # 延焼形状（燃料特性に応じた形状）
     if fuel_type == "森林":
-        shape_coords = get_mountain_shape(lat_center, lon_center, current_radius)
+        shape_coords = get_mountain_shape(lat_center, lon_center, radius_m)
     else:
-        shape_coords = create_half_circle_polygon(lat_center, lon_center, current_radius, wind_dir)
+        shape_coords = create_half_circle_polygon(lat_center, lon_center, radius_m, st.session_state.weather_data.get("winddirection", 0))
     
-    # アニメーション：延焼範囲が徐々に拡大する様子を2回実行し、最終状態を表示
-    if st.button("延焼範囲アニメーション開始"):
-        anim_placeholder = st.empty()
-        final_map = None
-        for cycle in range(2):
-            for r in range(0, int(current_radius) + 1, max(1, int(current_radius)//20)):
-                try:
-                    m_anim = folium.Map(location=[lat_center, lon_center], zoom_start=13)
-                    # 中心に十字マーカー
-                    cross_icon = folium.DivIcon(html='<div style="font-size:24px; color:blue;">&#10010;</div>')
-                    folium.Marker(location=[lat_center, lon_center], icon=cross_icon).add_to(m_anim)
-                    if fuel_type == "森林":
-                        poly = get_mountain_shape(lat_center, lon_center, r)
-                        folium.Polygon(locations=poly, color=color_hex, fill=True, fill_opacity=0.5).add_to(m_anim)
-                    else:
-                        folium.Circle(location=[lat_center, lon_center], radius=r, color=color_hex, fill=True, fill_opacity=0.5).add_to(m_anim)
-                    anim_placeholder.markdown("")  # 更新
-                    st_folium(m_anim, width=700, height=500)
-                    time.sleep(0.1)
-                    final_map = m_anim
-                except Exception as e:
-                    st.error(f"アニメーション中エラー: {e}")
-                    break
-        if final_map is not None:
-            st_folium(final_map, width=700, height=500)
-    
-    # 表示モード切替（延焼範囲は平面ポリゴンで表示）
+    # 地図（1枚だけ表示）
+    # 2D 表示の場合は Folium、3D 表示の場合も延焼範囲は平面ポリゴンで表示
     if display_mode == "2D":
-        m2d = folium.Map(location=[lat_center, lon_center], zoom_start=13)
+        final_map = folium.Map(location=[lat_center, lon_center], zoom_start=13)
         cross_icon = folium.DivIcon(html='<div style="font-size:24px; color:blue;">&#10010;</div>')
-        folium.Marker(location=[lat_center, lon_center], icon=cross_icon).add_to(m2d)
+        folium.Marker(location=[lat_center, lon_center], icon=cross_icon).add_to(final_map)
         if fuel_type == "森林":
-            poly = get_mountain_shape(lat_center, lon_center, current_radius)
-            folium.Polygon(locations=poly, color=color_hex, fill=True, fill_opacity=0.5).add_to(m2d)
+            folium.Polygon(locations=shape_coords, color=color_hex, fill=True, fill_opacity=0.5).add_to(final_map)
         else:
-            folium.Circle(location=[lat_center, lon_center], radius=current_radius, color=color_hex, fill=True, fill_opacity=0.5).add_to(m2d)
-        st.write("#### Folium 地図（延焼範囲）")
-        st_folium(m2d, width=700, height=500)
+            folium.Circle(location=[lat_center, lon_center], radius=radius_m, color=color_hex, fill=True, fill_opacity=0.5).add_to(final_map)
     else:
-        # 3D 表示：延焼範囲は平面のポリゴンとして表示（PolygonLayer）＋背景に DEM（TerrainLayer）
+        # 3D 表示：平面の延焼範囲ポリゴン
         polygon_layer = get_flat_polygon_layer(shape_coords, water_volume_tons, color_rgba)
         layers = [polygon_layer]
         if MAPBOX_TOKEN:
             terrain_layer = get_terrain_layer()
             if terrain_layer:
                 layers.append(terrain_layer)
+        final_map = None  # 3Dは pydeck で表示
         view_state = pdk.ViewState(
             latitude=lat_center,
             longitude=lon_center,
@@ -611,8 +532,41 @@ def run_simulation(duration_hours, time_label):
             mapStyle="mapbox://styles/mapbox/light-v10" if MAPBOX_TOKEN else None,
         )
         deck = pdk.Deck(layers=layers, initial_view_state=view_state)
-        st.write("#### 延焼範囲 (pydeck 3D)")
+    
+    # レポート：ユーザー向けの要約テキスト（JSON部分は排除）
+    summary_text = gemini_summarize_data(result, API_KEY, MODEL_NAME)
+    report_text = f"""
+**シミュレーション結果：**
+
+- 火災拡大半径: {radius_m:.2f} m
+- 拡大面積: {area_ha if isinstance(area_ha, str) else f'{area_ha:.2f}'} ヘクタール
+- 必要な消火水量: {water_volume_tons} トン
+
+【シナリオ別結果】  
+"""
+    if scenario == "通常の消火活動あり":
+        suppression_factor = 0.5
+        effective_radius = radius_m * suppression_factor
+        effective_area = math.pi * (effective_radius ** 2)
+        effective_area_ha = effective_area / 10000.0
+        extinguish_days = effective_area_ha / 20.0
+        terrain_info = "傾斜10度, 標高150m, 松林と草地混在"
+        equipment_suggestions = suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_days)
+        report_text += f"""
+・効果適用後の延焼半径: {effective_radius:.2f} m  
+・効果適用後の延焼面積: {effective_area_ha:.2f} ヘクタール  
+・推定消火完了日数: {extinguish_days:.1f} 日  
+・推奨消火設備: {equipment_suggestions}
+"""
+    # 画面レイアウト：上部に地図、下部にレポート
+    st.markdown("---")
+    st.subheader("シミュレーション結果マップ")
+    if display_mode == "2D":
+        st_folium(final_map, width=700, height=500)
+    else:
         st.pydeck_chart(deck, key="pydeck_chart_" + str(time.time()))
+    st.subheader("シミュレーションレポート")
+    st.markdown(report_text)
 
 # -----------------------------
 # 気象データ取得ボタン
@@ -627,23 +581,5 @@ if st.button("気象データ取得"):
         st.error("気象データの取得に失敗しました。")
 
 st.write("## 消火活動が行われない場合のシミュレーション")
-
-# -----------------------------
-# シミュレーション実行（タブ切替）
-# -----------------------------
-tab_day, tab_week, tab_month = st.tabs(["日単位", "週単位", "月単位"])
-with tab_day:
-    days = st.slider("日数を選択", 1, 30, 1, key="days_slider")
-    if st.button("シミュレーション実行 (日単位)", key="sim_day"):
-        duration = days * 24
-        run_simulation(duration, f"{days} 日後")
-with tab_week:
-    weeks = st.slider("週数を選択", 1, 52, 1, key="weeks_slider")
-    if st.button("シミュレーション実行 (週単位)", key="sim_week"):
-        duration = weeks * 7 * 24
-        run_simulation(duration, f"{weeks} 週後")
-with tab_month:
-    months = st.slider("月数を選択", 1, 12, 1, key="months_slider")
-    if st.button("シミュレーション実行 (月単位)", key="sim_month"):
-        duration = months * 30 * 24
-        run_simulation(duration, f"{months} ヶ月後")
+if st.button("シミュレーション実行"):
+    run_simulation("固定期間", "10日後")
