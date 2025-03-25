@@ -314,7 +314,6 @@ def suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_d
     suggestions.append(f"消火日数の目安: 約 {extinguish_days:.1f} 日")
     return ", ".join(suggestions)
 
-# 3D 表示用：延焼範囲を平面ポリゴンとして表示する PolygonLayer
 def get_flat_polygon_layer(coords, water_volume, color):
     polygon_data = [{"polygon": coords}]
     layer = pdk.Layer(
@@ -327,7 +326,6 @@ def get_flat_polygon_layer(coords, water_volume, color):
     )
     return layer
 
-# DEM 表示用 TerrainLayer（Mapbox）
 def get_terrain_layer():
     if not MAPBOX_TOKEN:
         return None
@@ -389,7 +387,7 @@ def run_simulation(time_label):
     else:
         shape_coords = create_half_circle_polygon(lat_center, lon_center, radius_m, st.session_state.weather_data.get("winddirection", 0))
     
-    # アニメーション表示（延焼範囲が徐々に拡大する様子）
+    # 延焼範囲アニメーション
     if st.button("延焼範囲アニメーション開始"):
         anim_placeholder = st.empty()
         final_map = None
