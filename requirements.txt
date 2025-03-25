@@ -3,8 +3,9 @@ folium
 streamlit-folium
 google-generativeai
 requests
-pydeck
+pydeck==0.9.0
 demjson3
 shapely
 geopandas
 pandas
+
