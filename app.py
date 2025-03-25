@@ -7,7 +7,6 @@ import json
 import math
 import re
 import pydeck as pdk
-import time
 import demjson3 as demjson  # Python3 用の demjson のフォーク
 from shapely.geometry import Point
 import geopandas as gpd
@@ -18,6 +17,13 @@ st.set_page_config(page_title="火災拡大シミュレーション (2D/3D レ�
 # --- API設定 ---
 API_KEY = st.secrets["general"]["api_key"]
 MODEL_NAME = "gemini-2.0-flash-001"
+
+# --- Tavily のトークン読み込み ---
+try:
+    TAVILY_TOKEN = st.secrets["tavily"]["api_key"]
+except Exception:
+    TAVILY_TOKEN = None
+    st.warning("Tavily のトークンが設定されていません。Tavily 検証機能は無効です。")
 
 # --- Gemini API の初期設定 ---
 genai.configure(api_key=API_KEY)
@@ -31,6 +37,7 @@ if 'weather_data' not in st.session_state:
 # -----------------------------
 # サイドバー入力
 # -----------------------------
+st.sidebar.header("入力設定")
 lat = st.sidebar.number_input("緯度", value=34.257586)
 lon = st.sidebar.number_input("経度", value=133.204356)
 fuel_type = st.sidebar.selectbox("燃料特性", ["森林", "草地", "都市部"])
@@ -41,8 +48,11 @@ if st.sidebar.button("登録地点を消去"):
     st.session_state.points = []
     st.sidebar.info("全ての発生地点を削除しました。")
 
+# 表示モードは最初からサイドバーに配置
+display_mode = st.sidebar.radio("表示モード", ("2D", "3D"))
+
 # -----------------------------
-# 初期マップ（2D）
+# 初期マップ（2D）表示
 # -----------------------------
 st.title("火災拡大シミュレーション（Gemini要約＋2D/3D レポート＆マッピング版）")
 try:
@@ -57,11 +67,7 @@ except Exception as e:
 # 関数定義
 # -----------------------------
 def extract_json(text: str) -> dict:
-    """
-    テキストからJSONオブジェクトを抽出する関数。
-    直接 json.loads() を試み、失敗した場合はマークダウン形式のコードブロックや
-    最初に現れる { ... } 部分を抽出して解析します。
-    """
+    """テキストからJSONオブジェクトを抽出する"""
     text = text.strip()
     try:
         return json.loads(text)
@@ -96,10 +102,7 @@ def extract_json(text: str) -> dict:
 
 @st.cache_data(show_spinner=False)
 def get_weather(lat, lon):
-    """
-    Open-Meteo APIから指定緯度・経度の気象情報を取得する関数。
-    温度、風速、風向、湿度、降水量などを返します。
-    """
+    """Open-Meteo APIから気象情報を取得する"""
     try:
         url = (
             f"https://api.open-meteo.com/v1/forecast?"
@@ -129,10 +132,7 @@ def get_weather(lat, lon):
         return {}
 
 def gemini_generate_text(prompt, api_key, model_name):
-    """
-    Gemini API にリクエストを送り、テキスト生成を行う関数。
-    送信前にプロンプト内容を表示（デバッグ用）し、応答の生JSONも返します。
-    """
+    """Gemini APIへプロンプトを送信してテキストを取得する"""
     try:
         st.write("【Gemini送信プロンプト】")
         st.code(prompt, language="text")
@@ -156,9 +156,7 @@ def gemini_generate_text(prompt, api_key, model_name):
         return None, None
 
 def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_deg):
-    """
-    風向きを考慮した半円形（扇形）の座標リストを生成します（[lon, lat]形式）。
-    """
+    """半円形の座標リストを生成する（[lon, lat]形式）"""
     try:
         deg_per_meter = 1.0 / 111000.0
         start_angle = wind_direction_deg - 90
@@ -182,10 +180,7 @@ def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_
         return []
 
 def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fuel_type):
-    """
-    Gemini API を利用して火災拡大予測を行う関数です。
-    指定の条件に基づいて、純粋なJSON形式で予測結果を出力します。
-    """
+    """Gemini API を利用して火災拡大予測を行う"""
     try:
         rep_lat, rep_lon = points[0]
         wind_speed = weather['windspeed']
@@ -289,29 +284,45 @@ def convert_json_for_map(original_json, center_lat, center_lon):
 
 def verify_with_tavily(radius, wind_direction, water_volume):
     """
-    Tavily を利用した（ダミー実装）インターネット検索による検証機能。
-    一致する情報が見つかれば検証結果メッセージを返し、
-    見つからなければそのままのデータを使用する旨を返します。
+    Tavily API を利用して、延焼半径、延焼方向、必要消火水量の検証を行う（ダミー実装）。
+    Tavily のトークンが設定されていれば実際に API を呼び出し、結果を返します。
+    一致する情報が見つかればその結果、見つからなければその旨を返します。
     """
-    messages = []
-    # 例として、延焼範囲は500m〜1000m、風向は0～360度、消火水量は正の値ならOKとする
-    if 500 <= radius <= 1000:
-        messages.append("延焼範囲: Tavily の検索結果と一致しています。")
-    else:
-        messages.append("延焼範囲: Tavily の検索結果と一致しませんでした。")
-    if 0 <= wind_direction <= 360:
-        messages.append("延焼方向: Tavily の検索結果と一致しています。")
-    else:
-        messages.append("延焼方向: Tavily の検索結果と一致しませんでした。")
+    if not TAVILY_TOKEN:
+        return ["Tavilyのトークンが設定されていないため、検証できません。"]
     try:
-        water_val = float(water_volume)
-        if water_val > 0:
-            messages.append("必要消火水量: Tavily の検索結果と一致しています。")
+        url = "https://api.tavily.com/search"
+        query = "火災 拡大半径 一般的"
+        payload = {
+            "query": query,
+            "topic": "fire",
+            "search_depth": "basic",
+            "chunks_per_source": 3,
+            "max_results": 1,
+            "time_range": None,
+            "days": 3,
+            "include_answer": True,
+            "include_raw_content": False,
+            "include_images": False,
+            "include_image_descriptions": False,
+            "include_domains": [],
+            "exclude_domains": []
+        }
+        headers = {
+            "Authorization": f"Bearer {TAVILY_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        response = requests.post(url, json=payload, headers=headers)
+        result = response.json()
+        messages = []
+        if "answer" in result and result["answer"]:
+            messages.append(f"Tavily検索結果: {result['answer']}")
         else:
-            messages.append("必要消火水量: Tavily の検索結果と一致しませんでした。")
-    except:
-        messages.append("必要消火水量: 数値が不正なため検証できませんでした。")
-    return messages
+            messages.append("Tavily検索結果が見つかりませんでした。元のデータを使用します。")
+        return messages
+    except Exception as e:
+        st.error(f"Tavily検証中にエラーが発生しました: {e}")
+        return ["Tavily検証中にエラーが発生しました。"]
 
 def run_simulation(duration_hours, time_label):
     if not st.session_state.get("weather_data"):
@@ -365,9 +376,7 @@ def run_simulation(duration_hours, time_label):
     st.write("#### Geminiによる要約")
     st.info(summary_text)
     
-    # Tavily による検証（ダミー実装）
-    wind_dir = st.session_state.weather_data.get("winddirection", 0)
-    verification_msgs = verify_with_tavily(radius_m, wind_dir, water_volume_tons)
+    verification_msgs = verify_with_tavily(radius_m, st.session_state.weather_data.get("winddirection", 0), water_volume_tons)
     st.write("#### Tavily 検証結果")
     for msg in verification_msgs:
         st.write(msg)
@@ -377,21 +386,19 @@ def run_simulation(duration_hours, time_label):
     current_radius = radius_m * fraction
     
     lat_center, lon_center = st.session_state.points[0]
+    wind_dir = st.session_state.weather_data.get("winddirection", 0)
     
-    # 座標変換処理は行わず、初回JSONの半径を使って円形の座標を生成
+    # 座標生成（Geminiへの再送信は行わず、初回JSONの "radius_m" を使用）
     try:
         coords = create_half_circle_polygon(lat_center, lon_center, current_radius, wind_dir)
     except Exception as e:
         st.error(f"座標生成でエラーが発生しました: {e}")
         coords = []
     
-    # 2D/3D 表示の切替
-    map_mode = st.radio("表示モード", ("2D", "3D"), key="map_mode")
-    
-    if map_mode == "2D":
+    # 2D/3D 表示の切替（最初からサイドバーの表示モードに従う）
+    if display_mode == "2D":
         folium_map = folium.Map(location=[lat_center, lon_center], zoom_start=13)
         folium.Marker(location=[lat_center, lon_center], popup="火災発生地点", icon=folium.Icon(color="red")).add_to(folium_map)
-        # 2Dの場合は Folium の Circle で円形を描画
         folium.Circle(location=[lat_center, lon_center], radius=current_radius, color="red", fill=True, fill_opacity=0.5).add_to(folium_map)
         st.write("#### Folium 地図（延焼範囲）")
         st_folium(folium_map, width=700, height=500)
@@ -415,7 +422,7 @@ def run_simulation(duration_hours, time_label):
             get_elevation='height',
             get_radius=30,
             elevation_scale=1,
-            get_fill_color='[200, 30, 30, 100]',  # アルファ値100で透明度を上げる
+            get_fill_color='[200, 30, 30, 100]',
             pickable=True,
             auto_highlight=True,
         )
