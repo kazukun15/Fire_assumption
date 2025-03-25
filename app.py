@@ -107,6 +107,7 @@ with st.sidebar.expander("シミュレーション設定", expanded=True):
     scenario = st.radio("シナリオ選択", ("消火活動なし", "通常の消火活動あり"))
     display_mode = st.radio("表示モード", ("2D", "3D"))
     show_raincloud = st.checkbox("雨雲オーバーレイ表示", value=True)
+# 発生地点追加と消去
 if st.sidebar.button("発生地点を追加"):
     if "center" in st.session_state:
         new_point = st.session_state["center"]
@@ -162,33 +163,36 @@ def display_weather_info(weather):
         st.error(f"気象情報表示中エラー: {e}")
 
 # -----------------------------
-# 雨雲データ取得関数（Yahoo! Weather API 使用例）
+# JMA 気象情報取得関数（東京地方の例）
 # -----------------------------
-def get_raincloud_data(lat, lon):
-    if not YAHOO_APPID:
-        st.warning("Yahoo! API の appid が設定されていません。雨雲オーバーレイは無効です。")
-        return None
+def get_weather_jma():
     try:
-        url = "https://map.yahooapis.jp/weather/V1/place"
-        params = {
-            "appid": YAHOO_APPID,
-            "lat": lat,
-            "lon": lon,
-            "output": "xml"
-        }
-        response = requests.get(url, params=params, timeout=10)
+        url = "https://www.jma.go.jp/bosai/forecast/data/forecast/130000.json"
+        response = requests.get(url, timeout=10)
         if response.status_code == 200:
-            root = ET.fromstring(response.content)
-            clouds = root.find(".//clouds")
-            if clouds is not None and clouds.get("img"):
-                image_url = clouds.get("img")
-                bounds = [[lat-1, lon-1], [lat+1, lon+1]]
-                return {"image_url": image_url, "bounds": bounds}
-        st.error("Yahoo! Weather API で雨雲情報が取得できませんでした。")
-        return None
+            data = response.json()
+            # data はリストになっているので最初の要素を取得
+            forecast = data[0]
+            # timeSeries のうち、temps を持つものから温度を取得（最初の温度を例とする）
+            for series in forecast.get("timeSeries", []):
+                if "temps" in series.get("areas", [{}])[0]:
+                    temps = series["areas"][0]["temps"]
+                    temperature = temps[0] if temps else "不明"
+                    # 風速などは JMA の予報データには含まれないため、固定値または "不明"
+                    return {
+                        "temperature": temperature,
+                        "windspeed": "不明",
+                        "winddirection": "不明",
+                        "humidity": "不明",
+                        "precipitation": "不明"
+                    }
+            return {}
+        else:
+            st.error("JMA 天気予報 API の取得に失敗しました。")
+            return {}
     except Exception as e:
-        st.error(f"雨雲データ取得中エラー: {e}")
-        return None
+        st.error(f"JMA 天気予報取得中エラー: {e}")
+        return {}
 
 # -----------------------------
 # 既存関数群
@@ -228,36 +232,10 @@ def extract_json(text: str) -> dict:
 
 @st.cache_data(show_spinner=False)
 def get_weather(lat, lon):
-    try:
-        url = (
-            f"https://api.open-meteo.com/v1/forecast?"
-            f"latitude={lat}&longitude={lon}&current_weather=true&"
-            f"hourly=relativehumidity_2m,precipitation&timezone=auto"
-        )
-        response = requests.get(url, timeout=10)
-        st.write("Open-Meteo API ステータスコード:", response.status_code)
-        data = response.json()
-        current = data.get("current_weather", {})
-        result = {
-            'temperature': current.get("temperature"),
-            'windspeed': current.get("windspeed"),
-            'winddirection': current.get("winddirection"),
-            'weathercode': current.get("weathercode")
-        }
-        current_time = current.get("time")
-        if current_time and "hourly" in data:
-            times = data["hourly"].get("time", [])
-            if current_time in times:
-                idx = times.index(current_time)
-                result["humidity"] = data["hourly"].get("relativehumidity_2m", [])[idx]
-                result["precipitation"] = data["hourly"].get("precipitation", [])[idx]
-        return result
-    except Exception as e:
-        st.error(f"気象データ取得中エラー: {e}")
-        return {}
+    # ここでは JMA の無料天気予報 JSON を使用（東京地方 "130000" の例）
+    return get_weather_jma()
 
 def gemini_generate_text(prompt, api_key, model_name):
-    # プロンプトは折りたたみ表示
     with st.expander("Gemini送信プロンプト（折りたたみ）"):
         st.code(prompt, language="text")
     try:
@@ -306,8 +284,8 @@ def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_
 def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fuel_type):
     try:
         rep_lat, rep_lon = points[0]
-        wind_speed = weather['windspeed']
-        wind_dir = weather['winddirection']
+        wind_speed = weather.get("windspeed", "不明")
+        wind_dir = weather.get("winddirection", "不明")
         temperature = weather.get("temperature", "不明")
         humidity_info = f"{weather.get('humidity', '不明')}%"
         precipitation_info = f"{weather.get('precipitation', '不明')} mm/h"
@@ -357,7 +335,6 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fu
         return None
 
 def gemini_summarize_data(json_data, api_key, model_name):
-    # 分析を行わないので、要約は表示しません（または固定テキスト）
     return "シミュレーション結果に基づくレポートを表示します。"
 
 def convert_json_for_map(original_json, center_lat, center_lon):
@@ -409,7 +386,7 @@ def suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_d
     suggestions.append(f"消火日数の目安: 約 {extinguish_days:.1f} 日")
     return ", ".join(suggestions)
 
-# 3D 表示でも延焼範囲は平面のポリゴンとして表示するための PolygonLayer
+# 3D 表示用：延焼範囲は平面のポリゴンとして表示する PolygonLayer
 def get_flat_polygon_layer(coords, water_volume, color):
     polygon_data = [{"polygon": coords}]
     layer = pdk.Layer(
@@ -474,19 +451,17 @@ def run_simulation(time_label):
         area_ha = "不明"
     water_volume_tons = result.get("water_volume_tons", "不明")
     
-    # 地図の中心は最初の発生地点
+    # 地図の中心は発生地点の最初の位置
     lat_center, lon_center = st.session_state.points[0]
     burn_days = duration_hours / 24
     color_rgba = get_color_by_days(burn_days)
     color_hex = rgb_to_hex(color_rgba)
     
-    # 延焼形状
     if fuel_type == "森林":
         shape_coords = get_mountain_shape(lat_center, lon_center, radius_m)
     else:
         shape_coords = create_half_circle_polygon(lat_center, lon_center, radius_m, st.session_state.weather_data.get("winddirection", 0))
     
-    # 地図（1枚の地図：2D/3D に応じた表示）
     if display_mode == "2D":
         final_map = folium.Map(location=[lat_center, lon_center], zoom_start=13)
         folium.Marker(location=[lat_center, lon_center], icon=folium.Icon(color="red")).add_to(final_map)
@@ -509,17 +484,16 @@ def run_simulation(time_label):
             bearing=0,
             mapStyle="mapbox://styles/mapbox/light-v10" if MAPBOX_TOKEN else None,
         )
-        final_map = None
         deck = pdk.Deck(layers=layers, initial_view_state=view_state)
     
-    # レポート（要約は固定テキストに変更）
+    # レポート
     report_text = f"""
 **シミュレーション結果：**
 
 - 火災拡大半径: {radius_m:.2f} m  
 - 拡大面積: {area_ha if isinstance(area_ha, str) else f'{area_ha:.2f}'} ヘクタール  
 - 必要な消火水量: {water_volume_tons} トン  
-- 燃焼継続日数: {burn_days:.1f} 日（色で示す）
+- 燃焼継続日数: {burn_days:.1f} 日
 """
     if scenario == "通常の消火活動あり":
         suppression_factor = 0.5
@@ -536,7 +510,6 @@ def run_simulation(time_label):
 - 推定消火完了日数: {extinguish_days:.1f} 日  
 - 推奨消火設備: {equipment_suggestions}
 """
-    # レイアウト：上部に地図、下部にレポート
     st.markdown("---")
     st.subheader("シミュレーション結果マップ")
     if display_mode == "2D":
@@ -546,7 +519,6 @@ def run_simulation(time_label):
     st.subheader("シミュレーションレポート")
     st.markdown(report_text)
     
-    # 雨雲オーバーレイ（オプション）
     if show_raincloud:
         rain_data = get_raincloud_data(lat_center, lon_center)
         if rain_data:
