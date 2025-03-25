@@ -7,7 +7,7 @@ import json
 import math
 import re
 import pydeck as pdk
-import demjson3 as demjson  # Python3 用の demjson のフォーク
+import demjson3 as demjson  # Python3 用 demjson のフォーク
 import time
 import xml.etree.ElementTree as ET
 from shapely.geometry import Point
@@ -45,53 +45,31 @@ if 'weather_data' not in st.session_state:
     st.session_state.weather_data = {}
 
 # -----------------------------
-# verify_with_tavily 関数（Tavily 検証）
-# -----------------------------
-def verify_with_tavily(radius, wind_direction, water_volume):
-    if not TAVILY_TOKEN:
-        return ["Tavilyのトークンが設定されていないため、検証できません。"]
-    try:
-        url = "https://api.tavily.com/search"
-        query = "火災 拡大半径 一般的"
-        payload = {
-            "query": query,
-            "topic": "fire",
-            "search_depth": "basic",
-            "chunks_per_source": 3,
-            "max_results": 1,
-            "time_range": None,
-            "days": 3,
-            "include_answer": True,
-            "include_raw_content": False,
-            "include_images": False,
-            "include_image_descriptions": False,
-            "include_domains": [],
-            "exclude_domains": []
-        }
-        headers = {
-            "Authorization": f"Bearer {TAVILY_TOKEN}",
-            "Content-Type": "application/json"
-        }
-        response = requests.post(url, json=payload, headers=headers)
-        result = response.json()
-        messages = []
-        if "answer" in result and result["answer"]:
-            messages.append(f"Tavily検索結果: {result['answer']}")
-        else:
-            messages.append("Tavily検索結果が見つかりませんでした。元のデータを使用します。")
-        return messages
-    except Exception as e:
-        st.error(f"Tavily検証中エラー: {e}")
-        return ["Tavily検証中にエラーが発生しました。"]
+# ヘルパー関数：日数に応じた色を算出（1日 → 緑、10日以上 → 赤）
+def get_color_by_days(days):
+    # 緑: (0,255,0)、赤: (255,0,0) への線形補間
+    ratio = min(days / 10, 1)
+    r = int(255 * ratio)
+    g = int(255 * (1 - ratio))
+    b = 0
+    return (r, g, b, 150)  # α=150
+
+def rgb_to_hex(color):
+    r, g, b, a = color
+    return '#{:02x}{:02x}{:02x}'.format(r, g, b)
 
 # -----------------------------
-# サイドバー入力
-# -----------------------------
-st.sidebar.header("入力設定")
-default_lat = st.sidebar.number_input("初期中心 緯度", value=34.257586)
-default_lon = st.sidebar.number_input("初期中心 経度", value=133.204356)
-fuel_type = st.sidebar.selectbox("燃料特性", ["森林", "草地", "都市部"])
+# サイドバー入力（expander 内にまとめる）
+with st.sidebar.expander("シミュレーション設定", expanded=True):
+    default_lat = st.number_input("初期中心 緯度", value=34.257586)
+    default_lon = st.number_input("初期中心 経度", value=133.204356)
+    fuel_type = st.selectbox("燃料特性", ["森林", "草地", "都市部"])
+    scenario = st.radio("シナリオ選択", ("消火活動なし", "通常の消火活動あり"))
+    display_mode = st.radio("表示モード", ("2D", "3D"))
+    show_raincloud = st.checkbox("雨雲オーバーレイ表示", value=True)
+
 if st.sidebar.button("発生地点を追加"):
+    # 発火地点は st_folium の "center" または初期中心位置
     if "center" in st.session_state:
         new_point = st.session_state["center"]
         if isinstance(new_point, dict):
@@ -104,12 +82,8 @@ if st.sidebar.button("登録地点を消去"):
     st.session_state.points = []
     st.sidebar.info("全ての発生地点を削除しました。")
 
-display_mode = st.sidebar.radio("表示モード", ("2D", "3D"))
-scenario = st.sidebar.radio("シナリオ選択", ("消火活動なし", "通常の消火活動あり"))
-show_raincloud = st.sidebar.checkbox("雨雲オーバーレイ表示", value=True)
-
 # -----------------------------
-# 初期マップ（2D）表示：中心は発生地点があればその最後の位置、なければ初期中心
+# 初期マップ（2D）表示（中心に十字マーカーを追加）
 # -----------------------------
 st.title("火災拡大シミュレーション＆雨雲オーバーレイ")
 if st.session_state.points:
@@ -123,6 +97,9 @@ for point in st.session_state.points:
     if isinstance(point, dict):
         point = [point.get("lat"), point.get("lng")]
     folium.Marker(location=point, icon=folium.Icon(color='red')).add_to(base_map)
+# 中心に十字マーカーを追加
+cross_icon = folium.DivIcon(html='<div style="font-size:24px; color:blue;">&#10010;</div>')
+folium.Marker(location=center, icon=cross_icon).add_to(base_map)
 map_data = st_folium(base_map, width=700, height=500)
 if "center" in map_data:
     st.session_state["center"] = map_data["center"]
@@ -300,7 +277,7 @@ def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fu
         precipitation_info = f"{weather.get('precipitation', '不明')} mm/h"
         slope_info = "10度程度の傾斜"
         elevation_info = "標高150m程度"
-        vegetation_info = "松林と草地が混在"
+        vegetation_info = "松林と草地混在"
         
         detailed_prompt = (
             "以下の最新気象データに基づいて、火災拡大シミュレーションを実施してください。\n"
@@ -411,17 +388,39 @@ def suggest_firefighting_equipment(terrain_info, effective_area_ha, extinguish_d
     return ", ".join(suggestions)
 
 # 3D 表示でも延焼範囲は平面のポリゴンとして表示するための PolygonLayer
-def get_flat_polygon_layer(coords, water_volume):
+def get_flat_polygon_layer(coords, water_volume, color):
     polygon_data = [{"polygon": coords}]
     layer = pdk.Layer(
         "PolygonLayer",
         data=polygon_data,
         get_polygon="polygon",
-        get_fill_color="[200, 30, 30, 100]",
+        get_fill_color=str(color),  # 例: "[200, 30, 30, 100]"
         pickable=True,
         auto_highlight=True,
     )
     return layer
+
+# -----------------------------
+# 3D表示用の DEM を重ねる TerrainLayer（Mapbox）
+def get_terrain_layer():
+    if not MAPBOX_TOKEN:
+        return None
+    terrain_layer = pdk.Layer(
+        "TerrainLayer",
+        data=f"https://api.mapbox.com/v4/mapbox.terrain-rgb/{{z}}/{{x}}/{{y}}.pngraw?access_token={MAPBOX_TOKEN}",
+        minZoom=0,
+        maxZoom=15,
+        meshMaxError=4,
+        elevationDecoder={
+            "rScaler": 256,
+            "gScaler": 256,
+            "bScaler": 256,
+            "offset": -10000
+        },
+        elevationScale=1,
+        getTerrainRGB=True,
+    )
+    return terrain_layer
 
 # -----------------------------
 # シミュレーション実行
@@ -504,10 +503,13 @@ def run_simulation(duration_hours, time_label):
     else:
         used_radius = radius_m
 
-    progress = st.slider("延焼進捗 (%)", 0, 100, 100, key="progress_slider")
-    fraction = progress / 100.0
-    current_radius = used_radius * fraction
-    
+    # 燃焼継続日数に応じた色を決定（duration_hours から日数算出）
+    burn_days = duration_hours / 24
+    color_rgba = get_color_by_days(burn_days)
+    color_hex = rgb_to_hex(color_rgba)
+
+    current_radius = used_radius  # 進捗スライダーは廃止し、全体延焼範囲をそのまま表示
+
     lat_center, lon_center = st.session_state.points[0]
     wind_dir = st.session_state.weather_data.get("winddirection", 0)
     
@@ -525,13 +527,15 @@ def run_simulation(duration_hours, time_label):
             for r in range(0, int(current_radius) + 1, max(1, int(current_radius)//20)):
                 try:
                     m_anim = folium.Map(location=[lat_center, lon_center], zoom_start=13)
-                    folium.Marker(location=[lat_center, lon_center], popup="発火地点", icon=folium.Icon(color="red")).add_to(m_anim)
+                    # 発火地点に十字マーカー追加
+                    cross_icon = folium.DivIcon(html='<div style="font-size:24px; color:blue;">&#10010;</div>')
+                    folium.Marker(location=[lat_center, lon_center], icon=cross_icon).add_to(m_anim)
                     if fuel_type == "森林":
                         poly = get_mountain_shape(lat_center, lon_center, r)
-                        folium.Polygon(locations=poly, color="red", fill=True, fill_opacity=0.5).add_to(m_anim)
+                        folium.Polygon(locations=poly, color=color_hex, fill=True, fill_opacity=0.5).add_to(m_anim)
                     else:
-                        folium.Circle(location=[lat_center, lon_center], radius=r, color="red", fill=True, fill_opacity=0.5).add_to(m_anim)
-                    anim_placeholder.markdown("")  # 更新用にプレースホルダーをクリア
+                        folium.Circle(location=[lat_center, lon_center], radius=r, color=color_hex, fill=True, fill_opacity=0.5).add_to(m_anim)
+                    anim_placeholder.empty()
                     st_folium(m_anim, width=700, height=500)
                     time.sleep(0.1)
                     final_map = m_anim
@@ -539,41 +543,29 @@ def run_simulation(duration_hours, time_label):
                     st.error(f"アニメーション中エラー: {e}")
                     break
         if final_map is not None:
+            anim_placeholder.empty()
             st_folium(final_map, width=700, height=500)
     
-    # 表示モード切替（延焼範囲は平面のポリゴンとして表示）
+    # 2D 表示（Folium）: 延焼範囲を平面のポリゴンとして表示（色は burn_days に応じた色）
     if display_mode == "2D":
         m2d = folium.Map(location=[lat_center, lon_center], zoom_start=13)
-        folium.Marker(location=[lat_center, lon_center], popup="発火地点", icon=folium.Icon(color="red")).add_to(m2d)
+        cross_icon = folium.DivIcon(html='<div style="font-size:24px; color:blue;">&#10010;</div>')
+        folium.Marker(location=[lat_center, lon_center], icon=cross_icon).add_to(m2d)
         if fuel_type == "森林":
             poly = get_mountain_shape(lat_center, lon_center, current_radius)
-            folium.Polygon(locations=poly, color="red", fill=True, fill_opacity=0.5).add_to(m2d)
+            folium.Polygon(locations=poly, color=color_hex, fill=True, fill_opacity=0.5).add_to(m2d)
         else:
-            folium.Circle(location=[lat_center, lon_center], radius=current_radius, color="red", fill=True, fill_opacity=0.5).add_to(m2d)
+            folium.Circle(location=[lat_center, lon_center], radius=current_radius, color=color_hex, fill=True, fill_opacity=0.5).add_to(m2d)
         st.write("#### Folium 地図（延焼範囲）")
         st_folium(m2d, width=700, height=500)
     else:
-        # 3D 表示でも延焼範囲は平面のポリゴンとして表示
-        polygon_layer = get_flat_polygon_layer(shape_coords, water_volume_tons)
+        # 3D 表示：延焼範囲は平面のポリゴンとして表示するため、PolygonLayer を利用
+        polygon_layer = get_flat_polygon_layer(shape_coords, water_volume_tons, color_rgba)
         layers = [polygon_layer]
-        # DEM 表示用 TerrainLayer（Mapbox のアクセストークンがある場合）
         if MAPBOX_TOKEN:
-            terrain_layer = pdk.Layer(
-                "TerrainLayer",
-                data=f"https://api.mapbox.com/v4/mapbox.terrain-rgb/{{z}}/{{x}}/{{y}}.pngraw?access_token={MAPBOX_TOKEN}",
-                minZoom=0,
-                maxZoom=15,
-                meshMaxError=4,
-                elevationDecoder={
-                    "rScaler": 256,
-                    "gScaler": 256,
-                    "bScaler": 256,
-                    "offset": -10000
-                },
-                elevationScale=1,
-                getTerrainRGB=True,
-            )
-            layers.append(terrain_layer)
+            terrain_layer = get_terrain_layer()
+            if terrain_layer:
+                layers.append(terrain_layer)
         view_state = pdk.ViewState(
             latitude=lat_center,
             longitude=lon_center,
