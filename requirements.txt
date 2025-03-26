@@ -1,7 +1,7 @@
 streamlit
-streamlit-folium
+streamlit-folium (バージョン0.18.0以上推奨)
 folium
 pydeck
 requests
 jaxa_earth
-demjson3
+time
