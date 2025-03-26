@@ -88,7 +88,7 @@ def generate_polygon(lat, lon, radius, wind_dir_deg):
         dlon = radius * math.sin(angle_rad) * deg_per_meter
         plat, plon = lat + dlat, lon + dlon
         elev = get_elevation(plat, plon)
-        coords.append([plon, plat, elev * 0.3])  # 高さ調整
+        coords.append([plon, plat, elev * 0.2])  # 高さをさらに低く調整
     return coords
 
 # --- メイン処理 ---
@@ -96,8 +96,7 @@ st.title("火災拡大シミュレーション")
 
 lat, lon = st.session_state.points[0]
 initial_view_state = pdk.ViewState(latitude=lat, longitude=lon, zoom=13, pitch=45)
-marker_layer = pdk.Layer("ScatterplotLayer", data=[{"position": [lon, lat]}], get_position="position", get_color=[255, 0, 0], get_radius=20)
-st.pydeck_chart(pdk.Deck(layers=[marker_layer], initial_view_state=initial_view_state, map_style="mapbox://styles/mapbox/satellite-streets-v11"))
+marker_layer = pdk.Layer("ScatterplotLayer", data=[{"position": [lon, lat]}], get_position="position", get_color=[255, 0, 0], get_radius=10)  # ピンを小さく
 
 st.sidebar.subheader("シミュレーション日数設定")
 days = st.sidebar.slider("日数を選択", 1, 7, 1)
@@ -118,3 +117,6 @@ if st.button("シミュレーション開始"):
 
         st.sidebar.subheader("現在の気象情報")
         st.sidebar.json(weather_data)
+
+else:
+    st.pydeck_chart(pdk.Deck(layers=[marker_layer], initial_view_state=initial_view_state, map_style="mapbox://styles/mapbox/satellite-streets-v11"))
