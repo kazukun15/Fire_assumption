@@ -21,21 +21,17 @@ model = genai.GenerativeModel('gemini-1.5-flash')
 
 # セッションステートの初期化
 if 'points' not in st.session_state:
-    st.session_state.points = []
+    st.session_state.points = [(34.257586, 133.204356)]
 
 # --- サイドバー設定 ---
 st.sidebar.header("火災発生地点の設定")
 with st.sidebar.form(key='location_form'):
     lat_input = st.number_input("緯度", format="%.6f", value=34.257586)
     lon_input = st.number_input("経度", format="%.6f", value=133.204356)
-    add_point = st.form_submit_button("発生地点を追加")
+    add_point = st.form_submit_button("発生地点を設定")
     if add_point:
         st.session_state.points = [(lat_input, lon_input)]
-        st.sidebar.success(f"地点 ({lat_input}, {lon_input}) を追加しました。")
-
-if st.sidebar.button("登録地点を消去"):
-    st.session_state.points = []
-    st.sidebar.info("発生地点を削除しました。")
+        st.sidebar.success(f"地点 ({lat_input}, {lon_input}) を設定しました。")
 
 fuel_options = {"森林（高燃料）": "森林", "草地（中燃料）": "草地", "都市部（低燃料）": "都市部"}
 selected_fuel = st.sidebar.selectbox("燃料特性を選択してください", list(fuel_options.keys()))
@@ -62,22 +58,22 @@ def get_weather(lat, lon):
     if response.status_code == 200:
         return response.json()
     else:
-        st.error(f"気象データの取得に失敗しました。ステータスコード: {response.status_code}")
+        st.error(f"気象データの取得に失敗しました。ステータスコード: {response.status_code}, 詳細: {response.text}")
         return {}
 
-# --- Geminiによる延焼範囲予測 ---
+# --- Geminiによる延焼範囲予測とレポート作成 ---
 def predict_fire_spread(lat, lon, weather, fuel_type):
     prompt = f"""
-    緯度:{lat}, 経度:{lon}の地点の地形と以下の気象条件、燃料特性:{fuel_type}に基づき、火災延焼半径を予測してください。
-    気象条件: 気温:{weather['main']['temp']}℃, 風速:{weather['wind']['speed']}m/s, 風向:{weather['wind']['deg']}度, 天気:{weather['weather'][0]['description']}
-    延焼半径を数字のみで回答（m）。
+    地点の緯度:{lat}, 経度:{lon}, 気象条件: 気温:{weather['main']['temp']}℃, 風速:{weather['wind']['speed']}m/s, 風向:{weather['wind']['deg']}度, 天気:{weather['weather'][0]['description']}, 燃料特性:{fuel_type}。
+    以下を含む火災延焼予測レポートを作成してください。
+    - 延焼半径（m）
+    - 延焼範囲（㎡）
+    - 必要な放水水量（トン）
+    - 推奨される消火設備
+    - 予測される火災状況
     """
     response = model.generate_content(prompt)
-    try:
-        radius = int(response.text.strip())
-    except ValueError:
-        radius = 500
-    return radius, weather['wind']['deg']
+    return response.text.strip()
 
 # --- ポリゴン生成 ---
 def generate_polygon(lat, lon, radius, wind_dir_deg):
@@ -97,16 +93,23 @@ def generate_polygon(lat, lon, radius, wind_dir_deg):
 # --- メイン処理 ---
 st.title("火災拡大シミュレーション")
 
-if st.button("シミュレーション開始") and st.session_state.points:
-    lat, lon = st.session_state.points[0]
+lat, lon = st.session_state.points[0]
+initial_view_state = pdk.ViewState(latitude=lat, longitude=lon, zoom=13, pitch=45)
+st.pydeck_chart(pdk.Deck(layers=[], initial_view_state=initial_view_state, map_style="mapbox://styles/mapbox/satellite-streets-v11"))
+
+if st.button("シミュレーション開始"):
     weather_data = get_weather(lat, lon)
     if weather_data:
-        radius, wind_dir = predict_fire_spread(lat, lon, weather_data, fuel_type)
-        polygon = generate_polygon(lat, lon, radius, wind_dir)
+        report = predict_fire_spread(lat, lon, weather_data, fuel_type)
+        st.markdown("### 火災延焼予測レポート")
+        st.markdown(report)
 
+        radius_match = re.search(r"延焼半径.*?(\d+)m", report)
+        radius = int(radius_match.group(1)) if radius_match else 500
+
+        polygon = generate_polygon(lat, lon, radius, weather_data['wind']['deg'])
         layer = pdk.Layer("PolygonLayer", [{"polygon": polygon}], extruded=True, get_fill_color=[255, 0, 0, 100])
-        view_state = pdk.ViewState(latitude=lat, longitude=lon, zoom=13, pitch=45)
-        st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state, map_style="mapbox://styles/mapbox/satellite-streets-v11"))
+        st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=initial_view_state, map_style="mapbox://styles/mapbox/satellite-streets-v11"))
 
         st.sidebar.subheader("現在の気象情報")
         st.sidebar.json(weather_data)
