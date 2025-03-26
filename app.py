@@ -6,9 +6,10 @@ import numpy as np
 from io import BytesIO
 from PIL import Image
 import google.generativeai as genai
+import time
 
 # --- ページ設定 ---
-st.set_page_config(page_title="地形に沿った火災拡大シミュレーション (3D DEM版)", layout="wide")
+st.set_page_config(page_title="火災拡大シミュレーション (Gemini & DEM)", layout="wide")
 
 # --- API設定 ---
 MAPBOX_TOKEN = st.secrets["mapbox"]["access_token"]
@@ -20,13 +21,10 @@ genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel('gemini-1.5-flash')
 
 # --- サイドバー設定 ---
-st.sidebar.header("設定")
+st.sidebar.header("火災発生地点の設定")
 city = st.sidebar.text_input("都市名を入力", "松山市")
-radius_default = st.sidebar.slider("初期延焼半径 (m)", 100, 1000, 500, step=50)
-wind_direction_default = st.sidebar.slider("風向 (度)", 0, 360, 45, step=5)
-
-# 初期座標（松山市）
-lat_center, lon_center = 33.8392, 132.7657
+lat_center = st.sidebar.number_input("緯度", value=33.8392, format="%.6f")
+lon_center = st.sidebar.number_input("経度", value=132.7657, format="%.6f")
 
 # --- 標高データ取得関数 ---
 def get_elevation(lat, lon):
@@ -42,18 +40,18 @@ def get_elevation(lat, lon):
         return elevation
     return 0
 
-# --- OpenWeatherMapから天気データ取得 ---
-def get_weather(city):
-    url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={OPENWEATHER_API_KEY}&lang=ja&units=metric"
+# --- 天気データ取得関数 ---
+def get_weather(lat, lon):
+    url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={OPENWEATHER_API_KEY}&lang=ja&units=metric"
     response = requests.get(url)
     if response.status_code == 200:
         return response.json()
     return {}
 
 # --- Geminiによる延焼範囲予測 ---
-def predict_fire_spread(city, weather):
+def predict_fire_spread(lat, lon, weather):
     prompt = f"""
-    地形と以下の気象条件に基づき、{city}周辺の火災延焼半径を予測してください。
+    緯度:{lat}, 経度:{lon}の地点の地形と以下の気象条件に基づき、火災延焼半径を予測してください。
 
     気象条件:
     - 気温: {weather['main']['temp']}℃
@@ -61,17 +59,17 @@ def predict_fire_spread(city, weather):
     - 風向: {weather['wind']['deg']}度
     - 天気: {weather['weather'][0]['description']}
 
-    延焼半径のみ数字で回答してください（単位はm）。
+    延焼半径を数字のみで回答してください（単位はm）。
     """
     response = model.generate_content(prompt)
     try:
         radius = int(response.text.strip())
     except ValueError:
-        radius = radius_default
+        radius = 500
     return radius, weather['wind']['deg']
 
-# --- 延焼範囲のポリゴン生成関数（地形対応） ---
-def generate_terrain_polygon(lat, lon, radius, wind_dir_deg):
+# --- ポリゴン生成 ---
+def generate_polygon(lat, lon, radius, wind_dir_deg):
     coords = []
     num_steps = 36
     deg_per_meter = 1.0 / 111000.0
@@ -82,45 +80,37 @@ def generate_terrain_polygon(lat, lon, radius, wind_dir_deg):
         dlon = radius * math.sin(angle_rad) * deg_per_meter
         plat, plon = lat + dlat, lon + dlon
         elev = get_elevation(plat, plon)
-        coords.append([plon, plat, elev * 0.7])
+        coords.append([plon, plat, elev * 0.5])  # 表示高さを調整
     return coords
 
-# --- 天気情報の取得とGemini予測 ---
-weather_data = get_weather(city)
-if weather_data:
-    predicted_radius, predicted_wind_direction = predict_fire_spread(city, weather_data)
-else:
-    predicted_radius, predicted_wind_direction = radius_default, wind_direction_default
+# --- アニメーション表示関数 ---
+def animate_fire(lat, lon, radius, wind_dir):
+    steps = 20
+    for r in np.linspace(0, radius, steps):
+        terrain_polygon = generate_polygon(lat, lon, r, wind_dir)
+        polygon_layer = pdk.Layer(
+            "PolygonLayer",
+            [{"polygon": terrain_polygon}],
+            extruded=True,
+            get_fill_color=[255, 100, 0, 160],
+            elevation_scale=1,
+        )
+        view_state = pdk.ViewState(latitude=lat, longitude=lon, zoom=13, pitch=45)
+        deck = pdk.Deck(layers=[polygon_layer], initial_view_state=view_state, map_style="mapbox://styles/mapbox/satellite-streets-v11")
+        map_area.pydeck_chart(deck)
+        time.sleep(0.1)
 
-# --- Pydeckでの3D表示 ---
-terrain_polygon = generate_terrain_polygon(lat_center, lon_center, predicted_radius, predicted_wind_direction)
-polygon_layer = pdk.Layer(
-    "PolygonLayer",
-    [{"polygon": terrain_polygon}],
-    get_polygon="polygon",
-    extruded=True,
-    get_fill_color=[255, 100, 0, 160],
-    elevation_scale=1,
-    pickable=True,
-    auto_highlight=True,
-)
-terrain_layer = pdk.Layer(
-    "TerrainLayer",
-    data=f"https://api.mapbox.com/v4/mapbox.terrain-rgb/{{z}}/{{x}}/{{y}}.pngraw?access_token={MAPBOX_TOKEN}",
-    elevation_decoder={"rScaler":256,"gScaler":256,"bScaler":256,"offset":-10000},
-    elevation_scale=1,
-)
-
-# --- 天気情報の表示 ---
-if weather_data:
-    st.sidebar.subheader("現在の気象情報")
-    st.sidebar.write(f"天気: {weather_data['weather'][0]['description']}")
-    st.sidebar.write(f"気温: {weather_data['main']['temp']} ℃")
-    st.sidebar.write(f"風速: {weather_data['wind']['speed']} m/s")
-
-# --- 表示 ---
-st.pydeck_chart(pdk.Deck(
-    layers=[terrain_layer, polygon_layer],
-    initial_view_state=pdk.ViewState(latitude=lat_center, longitude=lon_center, zoom=13, pitch=45),
-    map_style="mapbox://styles/mapbox/satellite-streets-v11",
-))
+# --- メイン処理 ---
+if st.button("火災シミュレーション開始"):
+    weather_data = get_weather(lat_center, lon_center)
+    if weather_data:
+        predicted_radius, wind_direction = predict_fire_spread(lat_center, lon_center, weather_data)
+        st.sidebar.subheader("現在の気象情報")
+        st.sidebar.write(f"天気: {weather_data['weather'][0]['description']}")
+        st.sidebar.write(f"気温: {weather_data['main']['temp']} ℃")
+        st.sidebar.write(f"風速: {weather_data['wind']['speed']} m/s")
+        st.sidebar.write(f"予測延焼半径: {predicted_radius} m")
+        map_area = st.empty()
+        animate_fire(lat_center, lon_center, predicted_radius, wind_direction)
+    else:
+        st.error("気象データの取得に失敗しました。")
