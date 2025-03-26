@@ -1,346 +1,419 @@
 import streamlit as st
 import folium
-from folium.plugins import HeatMap
 from streamlit_folium import st_folium
-import numpy as np
+import google.generativeai as genai
+import requests
+import json
 import math
-from skimage import measure
-import pandas as pd
-import branca.colormap as cm
-import io
-import xml.etree.ElementTree as ET
+import re
+import pydeck as pdk
+import time
+import demjson3 as demjson  # Python3 用の demjson のフォーク
+from shapely.geometry import Point
+import geopandas as gpd
 
-# ─────────────────────────────────────────────
-# セッション初期化
-# ─────────────────────────────────────────────
-def init_session_state():
-    if "map_center" not in st.session_state:
-        st.session_state.map_center = [34.25741795269067, 133.20450105700033]
-    if "map_zoom" not in st.session_state:
-        st.session_state.map_zoom = 14
-    if "speakers" not in st.session_state:
-        st.session_state.speakers = [
-            [34.25741795269067, 133.20450105700033, [0.0, 90.0]]  # 初期サンプル
-        ]
-    if "measurements" not in st.session_state:
-        st.session_state.measurements = []
-    if "heatmap_data" not in st.session_state:
-        st.session_state.heatmap_data = None
-    if "contours" not in st.session_state:
-        st.session_state.contours = {"60dB": [], "80dB": []}
-    if "L0" not in st.session_state:
-        st.session_state.L0 = 80  # 初期音圧レベル(dB)
-    if "r_max" not in st.session_state:
-        st.session_state.r_max = 500  # 最大伝播距離
+# --- ページ設定 ---
+st.set_page_config(page_title="火災拡大シミュレーション (2D/3D レポート＆マッピング版)", layout="wide")
 
-init_session_state()
+# --- API設定 ---
+API_KEY = st.secrets["general"]["api_key"]
+MODEL_NAME = "gemini-2.0-flash-001"
 
-# ─────────────────────────────────────────────
-# 定数・方向変換の設定
-# ─────────────────────────────────────────────
-DIRECTION_MAPPING = {
-    "N": 0, "E": 90, "S": 180, "W": 270,
-    "NE": 45, "SE": 135, "SW": 225, "NW": 315
-}
+# --- Gemini API の初期設定 ---
+genai.configure(api_key=API_KEY)
 
-def parse_direction_to_degrees(direction_str: str) -> float:
-    direction_str = direction_str.strip().upper()
-    if direction_str in DIRECTION_MAPPING:
-        return DIRECTION_MAPPING[direction_str]
+# --- セッションステートの初期化 ---
+if 'points' not in st.session_state:
+    st.session_state.points = []
+if 'weather_data' not in st.session_state:
+    st.session_state.weather_data = {}
+
+# -----------------------------
+# サイドバー入力（グローバル変数として）
+# -----------------------------
+lat = st.sidebar.number_input("緯度", value=34.257586)
+lon = st.sidebar.number_input("経度", value=133.204356)
+fuel_type = st.sidebar.selectbox("燃料特性", ["森林", "草地", "都市部"])
+if st.sidebar.button("発生地点を追加"):
+    st.session_state.points.append((lat, lon))
+    st.sidebar.success(f"地点 ({lat}, {lon}) を追加しました。")
+if st.sidebar.button("登録地点を消去"):
+    st.session_state.points = []
+    st.sidebar.info("全ての発生地点を削除しました。")
+
+# -----------------------------
+# メインUI：タイトルと初期マップ（2D表示）
+# -----------------------------
+st.title("火災拡大シミュレーション（Gemini要約＋2D/3D レポート＆マッピング版）")
+base_map = folium.Map(location=[lat, lon], zoom_start=12)
+for point in st.session_state.points:
+    folium.Marker(location=point, icon=folium.Icon(color='red')).add_to(base_map)
+st_folium(base_map, width=700, height=500)
+
+# -----------------------------
+# 関数定義
+# -----------------------------
+def extract_json(text: str) -> dict:
+    """
+    テキストからJSONオブジェクトを抽出する関数。
+    まず直接 json.loads() を試み、失敗した場合は
+    マークダウン形式のコードブロック（```json ... ```）または、
+    最初に現れる { ... } 部分を抽出して解析を試みます。
+    """
+    text = text.strip()
     try:
-        return float(direction_str)
-    except ValueError:
-        st.error(f"方向の指定 '{direction_str}' を数値に変換できません。0度として扱います。")
-        return 0.0
-
-# ─────────────────────────────────────────────
-# 1地点での理論音圧(dB)計算
-# ─────────────────────────────────────────────
-def calc_theoretical_db_for_point(lat: float, lon: float, speakers: list, L0: float, r_max: float):
-    lat, lon = float(lat), float(lon)
-    power_sum = 0.0
-    for spk_lat, spk_lon, spk_dirs in speakers:
-        dx = (lat - spk_lat) * 111320
-        dy = (lon - spk_lon) * 111320
-        dist = math.sqrt(dx * dx + dy * dy)
-        dist = max(dist, 1)  # 最小1m
-        if dist > r_max:
-            continue
-        bearing = math.degrees(math.atan2((lon - spk_lon), (lat - spk_lat))) % 360
-        spk_power = 0.0
-        for direction in spk_dirs:
-            angle_diff = abs(bearing - direction) % 360
-            if angle_diff > 180:
-                angle_diff = 360 - angle_diff
-            directivity_factor = max(0.0, 1 - angle_diff / 180.0)
-            p = 10 ** ((L0 - 20 * math.log10(dist)) / 10)
-            spk_power += directivity_factor * p
-        power_sum += spk_power
-    if power_sum <= 0:
-        return None
-    db_value = 10 * math.log10(power_sum)
-    return max(L0 - 40, min(db_value, L0))
-
-# ─────────────────────────────────────────────
-# CSV入出力処理
-# ─────────────────────────────────────────────
-def load_csv(file) -> (list, list):
-    try:
-        df = pd.read_csv(file)
-        speakers = []
-        measurements = []
-        for _, row in df.iterrows():
-            item_type = row.get("種別", None)
-            lat = row.get("緯度", None)
-            lon = row.get("経度", None)
-            d1 = row.get("データ1", None)
-            d2 = row.get("データ2", None)
-            d3 = row.get("データ3", None)
-            if pd.isna(lat) or pd.isna(lon):
-                continue
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    pattern_md = r"```json\s*(\{[\s\S]*?\})\s*```"
+    match = re.search(pattern_md, text)
+    if match:
+        json_str = match.group(1)
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
             try:
-                lat = float(lat)
-                lon = float(lon)
-            except ValueError:
-                st.warning("緯度/経度の値が不正です。該当行をスキップします。")
-                continue
-            if item_type == "スピーカ":
-                directions = []
-                for d in [d1, d2, d3]:
-                    if not pd.isna(d) and str(d).strip() != "":
-                        directions.append(parse_direction_to_degrees(str(d)))
-                speakers.append([lat, lon, directions])
-            elif item_type == "計測値":
-                try:
-                    db_val = float(d1) if not pd.isna(d1) else 0.0
-                except ValueError:
-                    db_val = 0.0
-                measurements.append([lat, lon, db_val])
-        return speakers, measurements
-    except Exception as e:
-        st.error(f"CSV読み込み中にエラー: {e}")
-        return [], []
+                return demjson.decode(json_str)
+            except Exception as e:
+                st.error(f"demjsonによるJSON解析に失敗しました: {e}")
+                return {}
+    pattern = r"\{[\s\S]*\}"
+    match = re.search(pattern, text)
+    if match:
+        json_str = match.group(0)
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            try:
+                return demjson.decode(json_str)
+            except Exception as e:
+                st.error(f"demjsonによるJSON解析に失敗しました: {e}")
+                return {}
+    st.error("有効なJSON文字列が見つかりませんでした。")
+    return {}
 
-def export_to_csv(speakers: list, measurements: list) -> bytes:
-    columns = ["種別", "緯度", "経度", "データ1", "データ2", "データ3"]
-    rows = []
-    for lat, lon, dirs in speakers:
-        row = {
-            "種別": "スピーカ",
-            "緯度": lat,
-            "経度": lon,
-            "データ1": dirs[0] if len(dirs) > 0 else "",
-            "データ2": dirs[1] if len(dirs) > 1 else "",
-            "データ3": dirs[2] if len(dirs) > 2 else "",
-        }
-        rows.append(row)
-    for lat_m, lon_m, db_m in measurements:
-        row = {
-            "種別": "計測値",
-            "緯度": lat_m,
-            "経度": lon_m,
-            "データ1": db_m,
-            "データ2": "",
-            "データ3": "",
-        }
-        rows.append(row)
-    df = pd.DataFrame(rows, columns=columns)
-    buffer = io.StringIO()
-    df.to_csv(buffer, index=False)
-    return buffer.getvalue().encode("utf-8")
-
-# ─────────────────────────────────────────────
-# グリッド生成（地図表示用）
-# ─────────────────────────────────────────────
-def create_grid(map_center: list, map_zoom: int, lat_offset: float = 0.01, lon_offset: float = 0.01):
-    lat_min = map_center[0] - lat_offset
-    lat_max = map_center[0] + lat_offset
-    lon_min = map_center[1] - lon_offset
-    lon_max = map_center[1] + lon_offset
-    zoom_factor = 100 + (map_zoom - 14) * 20
-    grid_lat, grid_lon = np.meshgrid(
-        np.linspace(lat_min, lat_max, zoom_factor),
-        np.linspace(lon_min, lon_max, zoom_factor)
+@st.cache_data(show_spinner=False)
+def get_weather(lat, lon):
+    """
+    Open-Meteo APIから指定緯度・経度の気象情報を取得する関数。
+    温度、風速、風向、湿度、降水量などの情報を返します。
+    """
+    url = (
+        f"https://api.open-meteo.com/v1/forecast?"
+        f"latitude={lat}&longitude={lon}&current_weather=true&"
+        f"hourly=relativehumidity_2m,precipitation&timezone=auto"
     )
-    return grid_lat.T, grid_lon.T
+    response = requests.get(url)
+    st.write("Open-Meteo API ステータスコード:", response.status_code)
+    data = response.json()
+    current = data.get("current_weather", {})
+    result = {
+        'temperature': current.get("temperature"),
+        'windspeed': current.get("windspeed"),
+        'winddirection': current.get("winddirection"),
+        'weathercode': current.get("weathercode")
+    }
+    current_time = current.get("time")
+    if current_time and "hourly" in data:
+        times = data["hourly"].get("time", [])
+        if current_time in times:
+            idx = times.index(current_time)
+            result["humidity"] = data["hourly"].get("relativehumidity_2m", [])[idx]
+            result["precipitation"] = data["hourly"].get("precipitation", [])[idx]
+    return result
 
-# ─────────────────────────────────────────────
-# Foliumマップにマーカー・ヒートマップ・等高線を追加
-# ─────────────────────────────────────────────
-def add_speaker_markers(m: folium.Map, speakers: list, L0: float, r_max: float):
-    for lat, lon, dirs in speakers:
-        popup_html = f"""
-        <div style="font-size:14px;">
-          <b>スピーカ:</b> ({lat:.6f}, {lon:.6f})<br>
-          <b>初期音圧:</b> {L0} dB<br>
-          <b>最大伝播距離:</b> {r_max} m<br>
-          <b>方向:</b> {dirs}
-        </div>
-        """
-        folium.Marker(
-            location=[lat, lon],
-            popup=folium.Popup(popup_html, max_width=300),
-            icon=folium.Icon(icon="volume-up", prefix="fa", color="blue")
-        ).add_to(m)
-
-def add_measurement_markers(m: folium.Map, measurements: list, speakers: list, L0: float, r_max: float):
-    for lat, lon, db_m in measurements:
-        theoretical_db = calc_theoretical_db_for_point(lat, lon, speakers, L0, r_max)
-        theo_str = f"{theoretical_db:.2f} dB" if theoretical_db is not None else "N/A"
-        popup_html = f"""
-        <div style="font-size:14px;">
-          <b>計測位置:</b> ({lat:.6f}, {lon:.6f})<br>
-          <b>計測値:</b> {db_m:.2f} dB<br>
-          <b>理論値:</b> {theo_str}
-        </div>
-        """
-        folium.Marker(
-            location=[lat, lon],
-            popup=folium.Popup(popup_html, max_width=300),
-            icon=folium.Icon(icon="info-circle", prefix="fa", color="green")
-        ).add_to(m)
-
-def add_heatmap_and_contours(m: folium.Map, heat_data: list, contours: dict):
-    if heat_data:
-        HeatMap(heat_data, radius=15, blur=20, min_opacity=0.4).add_to(m)
-    for contour in contours["60dB"]:
-        folium.PolyLine(locations=contour, color="green", weight=2).add_to(m)
-    for contour in contours["80dB"]:
-        folium.PolyLine(locations=contour, color="red", weight=2).add_to(m)
-
-# ─────────────────────────────────────────────
-# メイン処理（Streamlit UI）
-# ─────────────────────────────────────────────
-def main():
-    st.title("防災スピーカー音圧ヒートマップ")
-    
-    # サイドバー設定
-    st.sidebar.header("設定")
-    display_mode = st.sidebar.selectbox("表示モード", ["2D", "3D"])
-    fuel_type = st.sidebar.selectbox("燃料の種類", ["森林", "市街地"])
-    scenario = st.sidebar.selectbox("シナリオ", ["通常の消火活動あり", "消火活動なし"])
-    show_raincloud = st.sidebar.checkbox("雨雲レーダーを表示", value=False)
-    default_lat = st.sidebar.number_input("緯度", value=35.6895)
-    default_lon = st.sidebar.number_input("経度", value=139.6917)
-    
-    # マップ初期表示
-    st.session_state.map_center = [default_lat, default_lon]
-    st.session_state.map_zoom = 14
-    m = folium.Map(location=st.session_state.map_center, zoom_start=st.session_state.map_zoom, tiles="OpenStreetMap", control_scale=True)
-    add_speaker_markers(m, st.session_state.speakers, st.session_state.L0, st.session_state.r_max)
-    add_measurement_markers(m, st.session_state.measurements, st.session_state.speakers, st.session_state.L0, st.session_state.r_max)
-    if st.session_state.heatmap_data:
-        add_heatmap_and_contours(m, st.session_state.heatmap_data, st.session_state.contours)
-    st.sidebar.markdown("### 地図のプレビュー")
-    st_data = st_folium(m, width=700, height=500, returned_objects=["center", "zoom"])
-    if st_data:
-        new_center = [st_data["center"]["lat"], st_data["center"]["lng"]]
-        new_zoom = st_data["zoom"]
-        if new_center != st.session_state.map_center or new_zoom != st.session_state.map_zoom:
-            st.session_state.map_center = new_center
-            st.session_state.map_zoom = new_zoom
-            st.session_state.heatmap_data = None  # グリッド再計算のためリセット
-
-    # CSVアップロード
-    uploaded_file = st.sidebar.file_uploader("CSVをアップロード (種別/緯度/経度/データ1..3列)", type=["csv"])
-    if uploaded_file:
-        speakers_loaded, measurements_loaded = load_csv(uploaded_file)
-        if speakers_loaded:
-            st.session_state.speakers.extend(speakers_loaded)
-        if measurements_loaded:
-            st.session_state.measurements.extend(measurements_loaded)
-        st.sidebar.success("CSVを読み込みました。『更新』ボタンでヒートマップに反映可能です。")
-    
-    # 新規スピーカ追加
-    new_speaker = st.sidebar.text_input("新しいスピーカ (緯度,経度,方向1,方向2,方向3)", placeholder="例: 34.2579,133.2072,N,E,SE")
-    if st.sidebar.button("スピーカを追加"):
-        try:
-            items = new_speaker.split(",")
-            lat_spk = float(items[0])
-            lon_spk = float(items[1])
-            dirs_spk = [parse_direction_to_degrees(d) for d in items[2:]]
-            st.session_state.speakers.append([lat_spk, lon_spk, dirs_spk])
-            st.session_state.heatmap_data = None
-            st.sidebar.success(f"スピーカを追加しました: ({lat_spk}, {lon_spk}), 方向 = {dirs_spk}")
-        except Exception as e:
-            st.sidebar.error(f"入力エラー: {e}")
-    
-    # 計測値追加
-    new_measurement = st.sidebar.text_input("計測値 (緯度,経度,dB)", placeholder="例: 34.2578,133.2075,75")
-    if st.sidebar.button("計測値を追加"):
-        try:
-            items = new_measurement.split(",")
-            lat_m = float(items[0])
-            lon_m = float(items[1])
-            db_m = float(items[2])
-            st.session_state.measurements.append([lat_m, lon_m, db_m])
-            st.sidebar.success(f"計測値を追加しました: ({lat_m}, {lon_m}), {db_m} dB")
-        except Exception as e:
-            st.sidebar.error(f"入力エラー: {e}")
-    
-    if st.sidebar.button("スピーカをリセット"):
-        st.session_state.speakers = []
-        st.session_state.heatmap_data = None
-        st.session_state.contours = {"60dB": [], "80dB": []}
-        st.sidebar.success("スピーカ情報をリセットしました")
-    
-    if st.sidebar.button("計測値をリセット"):
-        st.session_state.measurements = []
-        st.sidebar.success("計測値情報をリセットしました")
-    
-    st.session_state.L0 = st.sidebar.slider("初期音圧レベル(dB)", 50, 100, st.session_state.L0)
-    st.session_state.r_max = st.sidebar.slider("最大伝播距離(m)", 100, 2000, st.session_state.r_max)
-    
-    if st.sidebar.button("更新"):
-        if st.session_state.speakers:
-            grid_lat, grid_lon = create_grid(st.session_state.map_center, st.session_state.map_zoom)
-            st.session_state.heatmap_data, st.session_state.contours = calculate_heatmap_and_contours(
-                st.session_state.speakers,
-                st.session_state.L0,
-                st.session_state.r_max,
-                grid_lat,
-                grid_lon
-            )
-            st.sidebar.success("ヒートマップと等高線を再計算しました")
+@st.cache_data(show_spinner=False)
+def gemini_generate_text(prompt, api_key, model_name):
+    """
+    Gemini API にリクエストを送り、テキスト生成を行う関数。
+    生のJSON応答も返します。
+    送信前にプロンプト内容を表示（デバッグ用）。
+    """
+    st.write("【Gemini送信プロンプト】")
+    st.code(prompt, language="text")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+    headers = {"Content-Type": "application/json"}
+    data = {"contents": [{"parts": [{"text": prompt}]}]}
+    response = requests.post(url, headers=headers, json=data)
+    st.write("Gemini API ステータスコード:", response.status_code)
+    raw_json = None
+    try:
+        raw_json = response.json()
+    except Exception:
+        st.error("Gemini APIレスポンスのJSONパースに失敗しました。")
+    if response.status_code == 200 and raw_json:
+        candidates = raw_json.get("candidates", [])
+        if candidates:
+            generated_text = candidates[0].get("content", {}).get("parts", [])[0].get("text", "").strip()
+            return generated_text, raw_json
         else:
-            st.sidebar.error("スピーカがありません。追加してください。")
+            return None, raw_json
+    else:
+        return None, raw_json
+
+def create_half_circle_polygon(center_lat, center_lon, radius_m, wind_direction_deg):
+    """
+    風向きを考慮した半円形（扇形）の座標列を生成する関数。
+    pydeck 用に [lon, lat] 形式で返します。
+    """
+    deg_per_meter = 1.0 / 111000.0
+    start_angle = wind_direction_deg - 90
+    end_angle = wind_direction_deg + 90
+    num_steps = 36
+    coords = []
+    coords.append([center_lon, center_lat])
+    for i in range(num_steps + 1):
+        angle_deg = start_angle + (end_angle - start_angle) * i / num_steps
+        angle_rad = math.radians(angle_deg)
+        offset_y = radius_m * math.cos(angle_rad)
+        offset_x = radius_m * math.sin(angle_rad)
+        offset_lat = offset_y * deg_per_meter
+        offset_lon = offset_x * deg_per_meter
+        new_lat = center_lat + offset_lat
+        new_lon = center_lon + offset_lon
+        coords.append([new_lon, new_lat])
+    return coords
+
+def predict_fire_spread(points, weather, duration_hours, api_key, model_name, fuel_type):
+    """
+    Gemini API を利用して火災拡大予測を行う関数です。
+    以下の条件に基づき、純粋なJSON形式のみを出力してください。
     
-    st.sidebar.subheader("CSVのエクスポート")
-    if st.sidebar.button("CSVをエクスポート"):
-        csv_data = export_to_csv(st.session_state.speakers, st.session_state.measurements)
-        st.sidebar.download_button(
-            label="CSVファイルのダウンロード",
-            data=csv_data,
-            file_name="sound_map_data.csv",
-            mime="text/csv"
+    【条件】
+    ・発生地点: 緯度 {rep_lat}, 経度 {rep_lon}
+    ・気象条件: 温度 {temperature}°C, 風速 {wind_speed} m/s, 風向 {wind_dir} 度,
+      湿度 {humidity_info}, 降水量 {precipitation_info}
+    ・地形情報: 傾斜 {slope_info}, 標高 {elevation_info}
+    ・植生: {vegetation_info}
+    ・燃料特性: {fuel_type}
+    
+    【求める出力】
+    絶対に純粋なJSON形式のみを出力してください（他のテキストを含むな）。
+    出力形式:
+    {"radius_m": 数値, "area_sqm": 数値, "water_volume_tons": 数値}
+    例:
+    {"radius_m": 650.00, "area_sqm": 1327322.89, "water_volume_tons": 475.50}
+    もしこの形式と異なる場合は、必ずエラーを出力してください。
+    """
+    rep_lat, rep_lon = points[0]
+    wind_speed = weather['windspeed']
+    wind_dir = weather['winddirection']
+    temperature = weather.get("temperature", "不明")
+    humidity_info = f"{weather.get('humidity', '不明')}%"
+    precipitation_info = f"{weather.get('precipitation', '不明')} mm/h"
+    slope_info = "10度程度の傾斜"
+    elevation_info = "標高150m程度"
+    vegetation_info = "松林と草地が混在"
+    
+    detailed_prompt = (
+        "以下の最新気象データに基づいて、火災拡大シミュレーションを実施してください。\n"
+        "【条件】\n"
+        f"・発生地点: 緯度 {rep_lat}, 経度 {rep_lon}\n"
+        f"・気象条件: 温度 {temperature}°C, 風速 {wind_speed} m/s, 風向 {wind_dir} 度, "
+        f"湿度 {humidity_info}, 降水量 {precipitation_info}\n"
+        f"・地形情報: 傾斜 {slope_info}, 標高 {elevation_info}\n"
+        f"・植生: {vegetation_info}\n"
+        f"・燃料特性: {fuel_type}\n"
+        "【求める出力】\n"
+        "絶対に純粋なJSON形式のみを出力してください（他のテキストを含むな）。\n"
+        "出力形式:\n"
+        '{"radius_m": 数値, "area_sqm": 数値, "water_volume_tons": 数値}\n'
+        "例:\n"
+        '{"radius_m": 650.00, "area_sqm": 1327322.89, "water_volume_tons": 475.50}\n'
+    )
+    
+    generated_text, raw_json = gemini_generate_text(detailed_prompt, api_key, model_name)
+    st.write("### Gemini API 生JSON応答")
+    if raw_json:
+        with st.expander("生JSON応答 (折りたたみ)"):
+            st.json(raw_json)
+    else:
+        st.warning("Gemini APIからJSON形式の応答が得られませんでした。")
+    
+    if not generated_text:
+        st.error("Gemini APIから有効な応答が得られませんでした。")
+        return None
+    
+    prediction_json = extract_json(generated_text)
+    if not prediction_json:
+        st.error("予測結果の解析に失敗しました。返されたテキストを確認してください。")
+        st.markdown(f"`json\n{generated_text}\n`")
+        return None
+    
+    required_keys = ["radius_m", "area_sqm", "water_volume_tons"]
+    if not all(key in prediction_json for key in required_keys):
+        st.error(f"JSONオブジェクトに必須キー {required_keys} が含まれていません。")
+        return None
+    
+    return prediction_json
+
+def gemini_summarize_data(json_data, api_key, model_name):
+    json_str = json.dumps(json_data, ensure_ascii=False, indent=2)
+    summary_prompt = (
+        "あなたはデータをわかりやすく説明するアシスタントです。\n"
+        "次の火災拡大シミュレーション結果のJSONを確認し、その内容を一般の方が理解しやすい日本語で要約してください。\n"
+        "```json\n" + json_str + "\n```\n"
+        "短く簡潔な説明文でお願いします。"
+    )
+    summary_text = gemini_generate_text(summary_prompt, API_KEY, model_name)
+    return summary_text or "要約が取得できませんでした。"
+
+def convert_json_for_map(original_json, center_lat, center_lon):
+    """
+    取得したJSON（例: "radius_m", "area_sqm", "water_volume_tons"）を元に、
+    中心点 (center_lat, center_lon) をもとに円形の境界の座標リストを生成するJSON形式に変換するため、Gemini API に送信します。
+    
+    出力形式の例:
+    {"coordinates": [[緯度, 経度], [緯度, 経度], ...]}
+    他のテキストは一切含まないこと。
+    入力JSON:
+    {original_json}
+    """
+    prompt = (
+        "以下のJSONは火災拡大の予測結果です。これを元に、中心点 ("
+        f"{center_lat}, {center_lon}) を中心とした円形の境界を表す座標リストを生成してください。\n"
+        "出力は必ず以下の形式にしてください。\n"
+        '{"coordinates": [[緯度, 経度], [緯度, 経度], ...]}\n'
+        "他のテキストは一切含まないこと。\n"
+        "入力JSON:\n" + json.dumps(original_json)
+    )
+    with st.spinner("座標変換中..."):
+        converted_text, raw = gemini_generate_text(prompt, API_KEY, MODEL_NAME)
+    if not converted_text:
+        st.error("座標変換用のGemini API応答が得られませんでした。")
+        return None
+    converted_json = extract_json(converted_text)
+    return converted_json
+
+def run_simulation(duration_hours, time_label):
+    if not st.session_state.get("weather_data"):
+        st.error("気象データが取得されていません。")
+        return
+    if not st.session_state.get("points"):
+        st.error("発生地点が設定されていません。")
+        return
+
+    with st.spinner(f"{time_label}のシミュレーションを実行中..."):
+        result = predict_fire_spread(st.session_state.points, st.session_state.weather_data, duration_hours, API_KEY, MODEL_NAME, fuel_type)
+    
+    if result is None:
+        return
+    
+    try:
+        radius_m = float(result.get("radius_m", 0))
+    except (KeyError, ValueError):
+        st.error("JSONに 'radius_m' の数値が見つかりません。")
+        return
+    area_sqm = result.get("area_sqm", "不明")
+    water_volume_tons = result.get("water_volume_tons", "不明")
+    
+    # ユーザー向けのわかりやすいレポート表示
+    st.write("### 予測結果レポート")
+    st.markdown(f"""
+**火災拡大半径:** {radius_m:.2f} メートル  
+この数値は、火災が拡大する最大の距離を示しています。
+
+**拡大面積:** {area_sqm:.2f} 平方メートル  
+火災が及ぶ面積を示しており、周囲の被害規模の参考となります。
+
+**必要な消火水量:** {water_volume_tons:.2f} トン  
+火災を消火するために必要とされる水量です。
+""")
+    
+    summary_text = gemini_summarize_data(result, API_KEY, MODEL_NAME)
+    st.write("#### Geminiによる要約")
+    st.info(summary_text)
+    
+    progress = st.slider("延焼進捗 (%)", 0, 100, 100, key="progress_slider")
+    fraction = progress / 100.0
+    current_radius = radius_m * fraction
+    
+    lat_center, lon_center = st.session_state.points[0]
+    wind_dir = st.session_state.weather_data.get("winddirection", 0)
+    
+    # JSON を再度 Gemini に送り、地図描写用の形式に変換する
+    with st.spinner("座標変換中..."):
+        converted = convert_json_for_map(result, lat_center, lon_center)
+    if converted and "coordinates" in converted:
+        coords = converted["coordinates"]
+    else:
+        coords = create_half_circle_polygon(lat_center, lon_center, current_radius, wind_dir)
+    
+    # 表示モード切り替え
+    map_mode = st.radio("表示モード", ("2D", "3D"), key="map_mode")
+    
+    if map_mode == "2D":
+        folium_map = folium.Map(location=[lat_center, lon_center], zoom_start=13)
+        folium.Marker(location=[lat_center, lon_center], popup="火災発生地点", icon=folium.Icon(color="red")).add_to(folium_map)
+        folium.Polygon(locations=coords, color="red", fill=True, fill_opacity=0.5).add_to(folium_map)
+        st.write("#### Folium 地図（延焼範囲）")
+        st_folium(folium_map, width=700, height=500)
+    else:
+        col_data = []
+        scale_factor = 50  # 放水量に基づくスケール例
+        try:
+            water_val = float(water_volume_tons)
+        except:
+            water_val = 100
+        for c in coords:
+            col_data.append({
+                "lon": c[0],
+                "lat": c[1],
+                "height": water_val / scale_factor
+            })
+        column_layer = pdk.Layer(
+            "ColumnLayer",
+            data=col_data,
+            get_position='[lon, lat]',
+            get_elevation='height',
+            get_radius=30,
+            elevation_scale=1,
+            get_fill_color='[200, 30, 30, 100]',  # アルファ値100で透明度を上げる
+            pickable=True,
+            auto_highlight=True,
         )
-    
-    st.sidebar.subheader("音圧レベルの凡例")
-    color_scale = cm.LinearColormap(
-        colors=["blue", "green", "yellow", "red"],
-        vmin=st.session_state.L0 - 40,
-        vmax=st.session_state.L0,
-        caption="音圧レベル (dB)"
-    )
-    st.sidebar.markdown(
-        f'<div style="width:100%; text-align:center;">{color_scale._repr_html_()}</div>',
-        unsafe_allow_html=True
-    )
-    
-    # メイン表示：地図とレポート
-    st.subheader("シミュレーション結果")
-    # ここで「気象データ取得」と「シミュレーション実行」ボタンを配置
-    if st.button("気象データ取得"):
-        weather_data = get_weather(default_lat, default_lon)
-        if weather_data:
-            st.session_state.weather_data = weather_data
-            st.write("取得した気象データ（日本語表示）:")
-            display_weather_info(weather_data)
-        else:
-            st.error("気象データの取得に失敗しました。")
-    
-    if st.button("シミュレーション実行"):
-        run_simulation("10日後")
+        view_state = pdk.ViewState(
+            latitude=lat_center,
+            longitude=lon_center,
+            zoom=13,
+            pitch=45
+        )
+        deck = pdk.Deck(layers=[column_layer], initial_view_state=view_state)
+        st.write("#### pydeck 3Dカラム表示")
+        st.pydeck_chart(deck)
 
-if __name__ == "__main__":
-    main()
+# -----------------------------
+# 気象データ取得ボタン
+# -----------------------------
+if st.button("気象データ取得"):
+    weather_data = get_weather(lat, lon)
+    if weather_data:
+        st.session_state.weather_data = weather_data
+        st.write(f"取得した気象データ: {weather_data}")
+    else:
+        st.error("気象データの取得に失敗しました。")
+
+st.write("## 消火活動が行われない場合のシミュレーション")
+
+# -----------------------------
+# シミュレーション実行（タブ切替）
+# -----------------------------
+tab_day, tab_week, tab_month = st.tabs(["日単位", "週単位", "月単位"])
+
+with tab_day:
+    days = st.slider("日数を選択", 1, 30, 1, key="days_slider")
+    if st.button("シミュレーション実行 (日単位)", key="sim_day"):
+        duration = days * 24
+        run_simulation(duration, f"{days} 日後")
+
+with tab_week:
+    weeks = st.slider("週数を選択", 1, 52, 1, key="weeks_slider")
+    if st.button("シミュレーション実行 (週単位)", key="sim_week"):
+        duration = weeks * 7 * 24
+        run_simulation(duration, f"{weeks} 週後")
+
+with tab_month:
+    months = st.slider("月数を選択", 1, 12, 1, key="months_slider")
+    if st.button("シミュレーション実行 (月単位)", key="sim_month"):
+        duration = months * 30 * 24
+        run_simulation(duration, f"{months} ヶ月後")
