@@ -96,7 +96,14 @@ st.title("火災拡大シミュレーション")
 
 lat, lon = st.session_state.points[0]
 initial_view_state = pdk.ViewState(latitude=lat, longitude=lon, zoom=13, pitch=45)
-st.pydeck_chart(pdk.Deck(layers=[], initial_view_state=initial_view_state, map_style="mapbox://styles/mapbox/satellite-streets-v11"))
+marker_layer = pdk.Layer(
+    "ScatterplotLayer",
+    data=[{"position": [lon, lat]}],
+    get_position="position",
+    get_color=[255, 0, 0],
+    get_radius=20,
+)
+st.pydeck_chart(pdk.Deck(layers=[marker_layer], initial_view_state=initial_view_state, map_style="mapbox://styles/mapbox/satellite-streets-v11"))
 
 if st.button("シミュレーション開始"):
     weather_data = get_weather(lat, lon)
@@ -109,8 +116,8 @@ if st.button("シミュレーション開始"):
         radius = int(radius_match.group(1)) if radius_match else 500
 
         polygon = generate_polygon(lat, lon, radius, weather_data['wind']['deg'])
-        layer = pdk.Layer("PolygonLayer", [{"polygon": polygon}], extruded=True, get_fill_color=[255, 0, 0, 100])
-        st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=initial_view_state, map_style="mapbox://styles/mapbox/satellite-streets-v11"))
+        polygon_layer = pdk.Layer("PolygonLayer", [{"polygon": polygon}], extruded=True, get_fill_color=[255, 0, 0, 100])
+        st.pydeck_chart(pdk.Deck(layers=[polygon_layer, marker_layer], initial_view_state=initial_view_state, map_style="mapbox://styles/mapbox/satellite-streets-v11"))
 
         st.sidebar.subheader("現在の気象情報")
         st.sidebar.json(weather_data)
