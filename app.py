@@ -13,8 +13,14 @@ st.set_page_config(page_title="地形に沿った火災拡大シミュレーシ�
 MAPBOX_TOKEN = st.secrets["mapbox"]["access_token"]
 OPENWEATHER_API_KEY = st.secrets["openweather"]["api_key"]
 
-# 初期座標
-lat_center, lon_center = 34.2576, 133.2045
+# --- サイドバー設定 ---
+st.sidebar.header("設定")
+city = st.sidebar.text_input("都市名を入力", "松山市")
+radius = st.sidebar.slider("延焼半径 (m)", 100, 1000, 500, step=50)
+wind_direction = st.sidebar.slider("風向 (度)", 0, 360, 45, step=5)
+
+# 初期座標（松山市）
+lat_center, lon_center = 33.8392, 132.7657
 
 # --- 標高データ取得関数 ---
 def get_elevation(lat, lon):
@@ -50,11 +56,11 @@ def generate_terrain_polygon(lat, lon, radius, wind_dir_deg):
         dlon = radius * math.sin(angle_rad) * deg_per_meter
         plat, plon = lat + dlat, lon + dlon
         elev = get_elevation(plat, plon)
-        coords.append([plon, plat, elev])
+        coords.append([plon, plat, elev * 0.7])  # 範囲の高さを30%低く
     return coords
 
 # --- Pydeckでの3D表示 ---
-terrain_polygon = generate_terrain_polygon(lat_center, lon_center, 500, 45)
+terrain_polygon = generate_terrain_polygon(lat_center, lon_center, radius, wind_direction)
 polygon_layer = pdk.Layer(
     "PolygonLayer",
     [{"polygon": terrain_polygon}],
@@ -72,10 +78,11 @@ terrain_layer = pdk.Layer(
     elevation_scale=1,
 )
 
-# --- 天気情報の表示（例：松山市） ---
-weather_data = get_weather("松山市")
+# --- 天気情報の表示 ---
+weather_data = get_weather(city)
 if weather_data:
-    st.sidebar.write(f"現在の天気: {weather_data['weather'][0]['description']}")
+    st.sidebar.subheader("現在の気象情報")
+    st.sidebar.write(f"天気: {weather_data['weather'][0]['description']}")
     st.sidebar.write(f"気温: {weather_data['main']['temp']} ℃")
     st.sidebar.write(f"風速: {weather_data['wind']['speed']} m/s")
 
