@@ -43,20 +43,6 @@ fuel_options = {"森林（高燃料）": "森林", "草地（中燃料）": "草
 selected_fuel = st.sidebar.selectbox("燃料特性を選択してください", list(fuel_options.keys()))
 fuel_type = fuel_options[selected_fuel]
 
-# --- 標高データ取得関数 ---
-def get_elevation(lat, lon):
-    zoom = 14
-    tile_x = int((lon + 180) / 360 * 2**zoom)
-    tile_y = int((1 - math.log(math.tan(math.radians(lat)) + 1 / math.cos(math.radians(lat))) / math.pi) / 2 * 2**zoom)
-    url = f"https://api.mapbox.com/v4/mapbox.terrain-rgb/{zoom}/{tile_x}/{tile_y}.pngraw?access_token={MAPBOX_TOKEN}"
-    response = requests.get(url)
-    if response.status_code == 200:
-        img = Image.open(BytesIO(response.content))
-        img_array = np.array(img)[128, 128, :3].astype(np.int32)
-        elevation = -10000 + ((img_array[0] * 256 * 256 + img_array[1] * 256 + img_array[2]) * 0.1)
-        return elevation
-    return 0
-
 # --- 天気データ取得関数 ---
 def get_weather(lat, lon):
     url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={OPENWEATHER_API_KEY}&lang=ja&units=metric"
@@ -81,27 +67,24 @@ def predict_fire_spread(lat, lon, weather, fuel_type, days):
     response = model.generate_content(prompt)
     return response.text.strip()
 
-# --- ポリゴン生成 ---
-def generate_polygon(lat, lon, radius, wind_dir_deg):
+# --- 円形ポリゴン生成 ---
+def generate_circle_polygon(lat, lon, radius):
     coords = []
-    num_steps = 36
+    num_steps = 72
     deg_per_meter = 1.0 / 111000.0
     for i in range(num_steps + 1):
-        angle_deg = wind_dir_deg - 90 + 180 * (i / num_steps)
-        angle_rad = math.radians(angle_deg)
+        angle_rad = 2 * math.pi * (i / num_steps)
         dlat = radius * math.cos(angle_rad) * deg_per_meter
         dlon = radius * math.sin(angle_rad) * deg_per_meter
-        plat, plon = lat + dlat, lon + dlon
-        elev = get_elevation(plat, plon)
-        coords.append([plon, plat, elev * 0.2])  # 高さをさらに低く調整
+        coords.append([lon + dlon, lat + dlat])
     return coords
 
 # --- メイン処理 ---
 st.title("火災拡大シミュレーション")
 
 lat, lon = st.session_state.points[0]
-initial_view_state = pdk.ViewState(latitude=lat, longitude=lon, zoom=13, pitch=45)
-marker_layer = pdk.Layer("ScatterplotLayer", data=[{"position": [lon, lat]}], get_position="position", get_color=[255, 0, 0], get_radius=10)
+initial_view_state = pdk.ViewState(latitude=lat, longitude=lon, zoom=13, pitch=0)
+marker_layer = pdk.Layer("ScatterplotLayer", data=[{"position": [lon, lat]}], get_position="position", get_color=[255, 0, 0], get_radius=5)
 
 st.sidebar.subheader("シミュレーション日数設定")
 days = st.sidebar.slider("日数を選択", 1, 7, 1)
@@ -116,8 +99,8 @@ if st.button("シミュレーション開始"):
         radius_match = re.search(r"延焼半径.*?(\d+)m", report)
         radius = int(radius_match.group(1)) if radius_match else 500
 
-        polygon = generate_polygon(lat, lon, radius, weather_data['wind']['deg'])
-        polygon_layer = pdk.Layer("PolygonLayer", [{"polygon": polygon}], extruded=True, get_fill_color=[255, 0, 0, 100])
+        polygon = generate_circle_polygon(lat, lon, radius)
+        polygon_layer = pdk.Layer("PolygonLayer", [{"polygon": polygon}], extruded=False, get_fill_color=[255, 0, 0, 100])
         st.pydeck_chart(pdk.Deck(layers=[polygon_layer, marker_layer], initial_view_state=initial_view_state, map_style="mapbox://styles/mapbox/satellite-streets-v11"))
 
         st.sidebar.subheader("現在の気象情報")
