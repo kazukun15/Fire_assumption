@@ -27,12 +27,17 @@ if 'points' not in st.session_state:
 # --- サイドバー設定 ---
 st.sidebar.header("火災発生地点の設定")
 with st.sidebar.form(key='location_form'):
-    lat_input = st.number_input("緯度", format="%.6f", value=34.257438)
-    lon_input = st.number_input("経度", format="%.6f", value=133.204321)
+    latlon_input = st.text_input("緯度, 経度 (Google Map形式で貼り付けてください)", value="34.257438, 133.204321")
     add_point = st.form_submit_button("発生地点を設定")
     if add_point:
-        st.session_state.points = [(lat_input, lon_input)]
-        st.sidebar.success(f"地点 ({lat_input}, {lon_input}) を設定しました。")
+        try:
+            lat_str, lon_str = latlon_input.split(',')
+            lat_input = float(lat_str.strip())
+            lon_input = float(lon_str.strip())
+            st.session_state.points = [(lat_input, lon_input)]
+            st.sidebar.success(f"地点 ({lat_input}, {lon_input}) を設定しました。")
+        except ValueError:
+            st.sidebar.error("有効な緯度経度を入力してください（例：34.257438, 133.204321）。")
 
 fuel_options = {"森林（高燃料）": "森林", "草地（中燃料）": "草地", "都市部（低燃料）": "都市部"}
 selected_fuel = st.sidebar.selectbox("燃料特性を選択してください", list(fuel_options.keys()))
@@ -96,7 +101,7 @@ st.title("火災拡大シミュレーション")
 
 lat, lon = st.session_state.points[0]
 initial_view_state = pdk.ViewState(latitude=lat, longitude=lon, zoom=13, pitch=45)
-marker_layer = pdk.Layer("ScatterplotLayer", data=[{"position": [lon, lat]}], get_position="position", get_color=[255, 0, 0], get_radius=10)  # ピンを小さく
+marker_layer = pdk.Layer("ScatterplotLayer", data=[{"position": [lon, lat]}], get_position="position", get_color=[255, 0, 0], get_radius=10)
 
 st.sidebar.subheader("シミュレーション日数設定")
 days = st.sidebar.slider("日数を選択", 1, 7, 1)
