@@ -1,7 +1,7 @@
-streamlit
-streamlit-folium (バージョン0.18.0以上推奨)
-folium
-pydeck
+streamlit>=1.14.0
+streamlit-folium>=0.18.0
+folium>=0.12.1
+pydeck>=0.8.1
 requests
-jaxa_earth
-time
+jaxa_earth>=0.1.2
+
