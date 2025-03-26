@@ -21,13 +21,13 @@ model = genai.GenerativeModel('gemini-1.5-flash')
 
 # セッションステートの初期化
 if 'points' not in st.session_state:
-    st.session_state.points = [(34.257586, 133.204356)]
+    st.session_state.points = [(33.839157, 132.765575)]  # 愛媛県（松山市）に初期位置を設定
 
 # --- サイドバー設定 ---
 st.sidebar.header("火災発生地点の設定")
 with st.sidebar.form(key='location_form'):
-    lat_input = st.number_input("緯度", format="%.6f", value=34.257586)
-    lon_input = st.number_input("経度", format="%.6f", value=133.204356)
+    lat_input = st.number_input("緯度", format="%.6f", value=33.839157)
+    lon_input = st.number_input("経度", format="%.6f", value=132.765575)
     add_point = st.form_submit_button("発生地点を設定")
     if add_point:
         st.session_state.points = [(lat_input, lon_input)]
@@ -94,7 +94,7 @@ def generate_polygon(lat, lon, radius, wind_dir_deg):
 st.title("火災拡大シミュレーション")
 
 lat, lon = st.session_state.points[0]
-initial_view_state = pdk.ViewState(latitude=lat, longitude=lon, zoom=13, pitch=45)
+initial_view_state = pdk.ViewState(latitude=lat, longitude=lon, zoom=12, pitch=45)
 st.pydeck_chart(pdk.Deck(layers=[], initial_view_state=initial_view_state, map_style="mapbox://styles/mapbox/satellite-streets-v11"))
 
 if st.button("シミュレーション開始"):
