@@ -7,3 +7,5 @@ demjson3
 shapely
 geopandas
 google-generativeai
+numpy
+Pillow
