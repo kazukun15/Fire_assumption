@@ -13,7 +13,7 @@ st.set_page_config(page_title="地形に沿った火災拡大シミュレーシ�
 # --- API設定 ---
 MAPBOX_TOKEN = st.secrets["mapbox"]["access_token"]
 OPENWEATHER_API_KEY = st.secrets["openweather"]["api_key"]
-GEMINI_API_KEY = st.secrets["gemini"]["api_key"]
+GEMINI_API_KEY = st.secrets["general"]["api_key"]
 
 # Gemini API設定
 genai.configure(api_key=GEMINI_API_KEY)
