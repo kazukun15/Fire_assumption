@@ -1,18 +1,11 @@
 import streamlit as st
-import folium
-from streamlit_folium import st_folium
-import google.generativeai as genai
 import requests
-import json
 import math
-import re
 import pydeck as pdk
-from shapely.geometry import Point
-import geopandas as gpd
 import numpy as np
 from io import BytesIO
 from PIL import Image
-import time
+import google.generativeai as genai
 
 # --- ページ設定 ---
 st.set_page_config(page_title="火災拡大シミュレーション (Gemini & DEM)", layout="wide")
@@ -68,7 +61,9 @@ def get_weather(lat, lon):
     response = requests.get(url)
     if response.status_code == 200:
         return response.json()
-    return {}
+    else:
+        st.error(f"気象データの取得に失敗しました。ステータスコード: {response.status_code}")
+        return {}
 
 # --- Geminiによる延焼範囲予測 ---
 def predict_fire_spread(lat, lon, weather, fuel_type):
@@ -115,5 +110,3 @@ if st.button("シミュレーション開始") and st.session_state.points:
 
         st.sidebar.subheader("現在の気象情報")
         st.sidebar.json(weather_data)
-    else:
-        st.error("気象データ取得に失敗しました。")
