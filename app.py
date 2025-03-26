@@ -18,12 +18,14 @@ lat_center, lon_center = 34.2576, 133.2045
 
 # --- 標高データ取得関数 ---
 def get_elevation(lat, lon):
-    zoom, tile_x, tile_y = 14, int((lon + 180) / 360 * 2**14), int((1 - math.log(math.tan(math.radians(lat)) + 1 / math.cos(math.radians(lat))) / math.pi) / 2 * 2**14)
+    zoom = 14
+    tile_x = int((lon + 180) / 360 * 2**zoom)
+    tile_y = int((1 - math.log(math.tan(math.radians(lat)) + 1 / math.cos(math.radians(lat))) / math.pi) / 2 * 2**zoom)
     url = f"https://api.mapbox.com/v4/mapbox.terrain-rgb/{zoom}/{tile_x}/{tile_y}.pngraw?access_token={MAPBOX_TOKEN}"
     response = requests.get(url)
     if response.status_code == 200:
         img = Image.open(BytesIO(response.content))
-        img_array = np.array(img)[128, 128, :3]  # タイル中心のピクセル
+        img_array = np.array(img)[128, 128, :3].astype(np.int32)
         elevation = -10000 + ((img_array[0] * 256 * 256 + img_array[1] * 256 + img_array[2]) * 0.1)
         return elevation
     return 0
