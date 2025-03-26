@@ -63,9 +63,9 @@ def get_weather(lat, lon):
         return {}
 
 # --- Geminiによる延焼範囲予測とレポート作成 ---
-def predict_fire_spread(lat, lon, weather, fuel_type):
+def predict_fire_spread(lat, lon, weather, fuel_type, days):
     prompt = f"""
-    地点の緯度:{lat}, 経度:{lon}, 気象条件: 気温:{weather['main']['temp']}℃, 風速:{weather['wind']['speed']}m/s, 風向:{weather['wind']['deg']}度, 天気:{weather['weather'][0]['description']}, 燃料特性:{fuel_type}。
+    地点の緯度:{lat}, 経度:{lon}, 気象条件: 気温:{weather['main']['temp']}℃, 風速:{weather['wind']['speed']}m/s, 風向:{weather['wind']['deg']}度, 天気:{weather['weather'][0]['description']}, 燃料特性:{fuel_type}, 発生からの日数:{days}日。
     以下を含む火災延焼予測レポートを作成してください。
     - 延焼半径（m）
     - 延焼範囲（㎡）
@@ -88,7 +88,7 @@ def generate_polygon(lat, lon, radius, wind_dir_deg):
         dlon = radius * math.sin(angle_rad) * deg_per_meter
         plat, plon = lat + dlat, lon + dlon
         elev = get_elevation(plat, plon)
-        coords.append([plon, plat, elev * 0.5])
+        coords.append([plon, plat, elev * 0.3])  # 高さ調整
     return coords
 
 # --- メイン処理 ---
@@ -96,19 +96,16 @@ st.title("火災拡大シミュレーション")
 
 lat, lon = st.session_state.points[0]
 initial_view_state = pdk.ViewState(latitude=lat, longitude=lon, zoom=13, pitch=45)
-marker_layer = pdk.Layer(
-    "ScatterplotLayer",
-    data=[{"position": [lon, lat]}],
-    get_position="position",
-    get_color=[255, 0, 0],
-    get_radius=20,
-)
+marker_layer = pdk.Layer("ScatterplotLayer", data=[{"position": [lon, lat]}], get_position="position", get_color=[255, 0, 0], get_radius=20)
 st.pydeck_chart(pdk.Deck(layers=[marker_layer], initial_view_state=initial_view_state, map_style="mapbox://styles/mapbox/satellite-streets-v11"))
+
+st.sidebar.subheader("シミュレーション日数設定")
+days = st.sidebar.slider("日数を選択", 1, 7, 1)
 
 if st.button("シミュレーション開始"):
     weather_data = get_weather(lat, lon)
     if weather_data:
-        report = predict_fire_spread(lat, lon, weather_data, fuel_type)
+        report = predict_fire_spread(lat, lon, weather_data, fuel_type, days)
         st.markdown("### 火災延焼予測レポート")
         st.markdown(report)
 
