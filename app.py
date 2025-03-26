@@ -1,11 +1,17 @@
 import streamlit as st
+import folium
+from streamlit_folium import st_folium
+import google.generativeai as genai
 import requests
+import json
 import math
+import re
 import pydeck as pdk
+from shapely.geometry import Point
+import geopandas as gpd
 import numpy as np
 from io import BytesIO
 from PIL import Image
-import google.generativeai as genai
 import time
 
 # --- ページ設定 ---
@@ -20,11 +26,27 @@ GEMINI_API_KEY = st.secrets["general"]["api_key"]
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel('gemini-1.5-flash')
 
+# セッションステートの初期化
+if 'points' not in st.session_state:
+    st.session_state.points = []
+
 # --- サイドバー設定 ---
 st.sidebar.header("火災発生地点の設定")
-city = st.sidebar.text_input("都市名を入力", "松山市")
-lat_center = st.sidebar.number_input("緯度", value=33.8392, format="%.6f")
-lon_center = st.sidebar.number_input("経度", value=132.7657, format="%.6f")
+with st.sidebar.form(key='location_form'):
+    lat_input = st.number_input("緯度", format="%.6f", value=34.257586)
+    lon_input = st.number_input("経度", format="%.6f", value=133.204356)
+    add_point = st.form_submit_button("発生地点を追加")
+    if add_point:
+        st.session_state.points = [(lat_input, lon_input)]
+        st.sidebar.success(f"地点 ({lat_input}, {lon_input}) を追加しました。")
+
+if st.sidebar.button("登録地点を消去"):
+    st.session_state.points = []
+    st.sidebar.info("発生地点を削除しました。")
+
+fuel_options = {"森林（高燃料）": "森林", "草地（中燃料）": "草地", "都市部（低燃料）": "都市部"}
+selected_fuel = st.sidebar.selectbox("燃料特性を選択してください", list(fuel_options.keys()))
+fuel_type = fuel_options[selected_fuel]
 
 # --- 標高データ取得関数 ---
 def get_elevation(lat, lon):
@@ -49,17 +71,11 @@ def get_weather(lat, lon):
     return {}
 
 # --- Geminiによる延焼範囲予測 ---
-def predict_fire_spread(lat, lon, weather):
+def predict_fire_spread(lat, lon, weather, fuel_type):
     prompt = f"""
-    緯度:{lat}, 経度:{lon}の地点の地形と以下の気象条件に基づき、火災延焼半径を予測してください。
-
-    気象条件:
-    - 気温: {weather['main']['temp']}℃
-    - 風速: {weather['wind']['speed']} m/s
-    - 風向: {weather['wind']['deg']}度
-    - 天気: {weather['weather'][0]['description']}
-
-    延焼半径を数字のみで回答してください（単位はm）。
+    緯度:{lat}, 経度:{lon}の地点の地形と以下の気象条件、燃料特性:{fuel_type}に基づき、火災延焼半径を予測してください。
+    気象条件: 気温:{weather['main']['temp']}℃, 風速:{weather['wind']['speed']}m/s, 風向:{weather['wind']['deg']}度, 天気:{weather['weather'][0]['description']}
+    延焼半径を数字のみで回答（m）。
     """
     response = model.generate_content(prompt)
     try:
@@ -80,37 +96,24 @@ def generate_polygon(lat, lon, radius, wind_dir_deg):
         dlon = radius * math.sin(angle_rad) * deg_per_meter
         plat, plon = lat + dlat, lon + dlon
         elev = get_elevation(plat, plon)
-        coords.append([plon, plat, elev * 0.5])  # 表示高さを調整
+        coords.append([plon, plat, elev * 0.5])
     return coords
 
-# --- アニメーション表示関数 ---
-def animate_fire(lat, lon, radius, wind_dir):
-    steps = 20
-    for r in np.linspace(0, radius, steps):
-        terrain_polygon = generate_polygon(lat, lon, r, wind_dir)
-        polygon_layer = pdk.Layer(
-            "PolygonLayer",
-            [{"polygon": terrain_polygon}],
-            extruded=True,
-            get_fill_color=[255, 100, 0, 160],
-            elevation_scale=1,
-        )
-        view_state = pdk.ViewState(latitude=lat, longitude=lon, zoom=13, pitch=45)
-        deck = pdk.Deck(layers=[polygon_layer], initial_view_state=view_state, map_style="mapbox://styles/mapbox/satellite-streets-v11")
-        map_area.pydeck_chart(deck)
-        time.sleep(0.1)
-
 # --- メイン処理 ---
-if st.button("火災シミュレーション開始"):
-    weather_data = get_weather(lat_center, lon_center)
+st.title("火災拡大シミュレーション")
+
+if st.button("シミュレーション開始") and st.session_state.points:
+    lat, lon = st.session_state.points[0]
+    weather_data = get_weather(lat, lon)
     if weather_data:
-        predicted_radius, wind_direction = predict_fire_spread(lat_center, lon_center, weather_data)
+        radius, wind_dir = predict_fire_spread(lat, lon, weather_data, fuel_type)
+        polygon = generate_polygon(lat, lon, radius, wind_dir)
+
+        layer = pdk.Layer("PolygonLayer", [{"polygon": polygon}], extruded=True, get_fill_color=[255, 0, 0, 100])
+        view_state = pdk.ViewState(latitude=lat, longitude=lon, zoom=13, pitch=45)
+        st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state, map_style="mapbox://styles/mapbox/satellite-streets-v11"))
+
         st.sidebar.subheader("現在の気象情報")
-        st.sidebar.write(f"天気: {weather_data['weather'][0]['description']}")
-        st.sidebar.write(f"気温: {weather_data['main']['temp']} ℃")
-        st.sidebar.write(f"風速: {weather_data['wind']['speed']} m/s")
-        st.sidebar.write(f"予測延焼半径: {predicted_radius} m")
-        map_area = st.empty()
-        animate_fire(lat_center, lon_center, predicted_radius, wind_direction)
+        st.sidebar.json(weather_data)
     else:
-        st.error("気象データの取得に失敗しました。")
+        st.error("気象データ取得に失敗しました。")
