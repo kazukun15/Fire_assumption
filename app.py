@@ -12,7 +12,7 @@ from PIL import Image
 import google.generativeai as genai
 
 # --- ページ設定 ---
-st.set_page_config(page_title="火災シミュレーション＋双方向地点設定＋Geminiレポート", layout="wide")
+st.set_page_config(page_title="火災シミュレーション＋双方向地点設定＋逆ジオコーディング＋Geminiレポート", layout="wide")
 
 # --- Secrets の読み込み ---
 MAPBOX_TOKEN        = st.secrets["mapbox"]["access_token"]
@@ -29,8 +29,27 @@ if "fire_location" not in st.session_state:
     # 初期地点：愛媛県松山市付近
     st.session_state.fire_location = (34.25743760177552, 133.2043209338966)
 
+# --- リバースジオコーディング関数（Mapbox） ---
+@st.cache_data(ttl=3600)
+def get_place_name(lat, lon):
+    """Mapbox Geocoding APIで緯度経度から場所名を取得"""
+    url = (
+        f"https://api.mapbox.com/geocoding/v5/mapbox.places/"
+        f"{lon},{lat}.json"
+        f"?access_token={MAPBOX_TOKEN}"
+        f"&language=ja&limit=1"
+    )
+    res = requests.get(url, timeout=10)
+    if res.status_code == 200:
+        data = res.json()
+        features = data.get("features")
+        if features:
+            # 最上位フィーチャーの place_name を返す
+            return features[0].get("place_name", "")
+    return "不明な場所"
+
 # --- サイドバー UI ---
-st.sidebar.header("🔥 発生地点・シミュレーション設定")
+st.sidebar.header("🔥 発生地点・設定")
 
 # (1) テキスト入力による地点設定
 latlon_text = st.sidebar.text_input(
@@ -43,7 +62,7 @@ if st.sidebar.button("テキストで更新"):
         st.session_state.fire_location = (float(m[1]), float(m[2]))
         st.sidebar.success("発生地点をテキストで更新しました")
     else:
-        st.sidebar.error("形式エラー：例 34.2574376, 133.2043209")
+        st.sidebar.error("形式エラー：例 34.2574376, 133.2043209338969")
 
 st.sidebar.markdown("---")
 
@@ -55,7 +74,7 @@ fuel_coeff = fuel_map[fuel_label]
 days       = st.sidebar.slider("経過日数 (日)", 1, 7, 4)
 show_firms = st.sidebar.checkbox("FIRMSデータを重ねる", value=False)
 
-# --- キャッシュ化データ取得関数 ---
+# --- キャッシュ化したデータ取得関数 ---
 @st.cache_data(ttl=600)
 def get_weather(lat, lon):
     url = (
@@ -71,7 +90,7 @@ def get_weather(lat, lon):
 def get_firms_area(lat, lon, days, map_key):
     delta = 0.5
     south, north = lat - delta, lat + delta
-    west,  east  = lon - delta, lon + delta
+    west,  east   = lon - delta, lon + delta
     bbox = f"{west},{south},{east},{north}"
     url = (
         f"https://firms.modaps.eosdis.nasa.gov/api/area/"
@@ -88,8 +107,8 @@ def get_firms_area(lat, lon, days, map_key):
     for row in reader:
         try:
             out.append({
-                "lat": float(row["latitude"]),
-                "lon": float(row["longitude"]),
+                "lat":   float(row["latitude"]),
+                "lon":   float(row["longitude"]),
                 "bright": float(row.get("bright_ti4", 0))
             })
         except:
@@ -124,10 +143,10 @@ def generate_terrain_polygon(lat, lon, radius, wind_dir):
     return coords
 
 # --- Gemini要約レポート生成 ---
-def summarize_fire(lat, lon, wind, fuel, days, radius, area, water):
+def summarize_fire(lat, lon, place, wind, fuel, days, radius, area, water):
     prompt = (
         f"以下は火災シミュレーションの結果です。\n"
-        f"- 発生地点: 緯度{lat}, 経度{lon}\n"
+        f"- 発生地点: {place} (緯度{lat}, 経度{lon})\n"
         f"- 風速: {wind['speed']} m/s, 風向: {wind['deg']}°\n"
         f"- 燃料特性: {fuel}\n"
         f"- 経過日数: {days}日\n"
@@ -155,9 +174,13 @@ if map_data and map_data.get("last_clicked"):
 # --- シミュレーション結果表示 ---
 st.subheader("🔥 火災シミュレーション結果")
 lat_c, lon_c = st.session_state.fire_location
+
+# 逆ジオコーディングで正式名称取得
+place_name = get_place_name(lat_c, lon_c)
+st.markdown(f"**発生地点:** {place_name}")
+
 weather = get_weather(lat_c, lon_c)
 wind    = weather.get("wind", {"speed":0, "deg":0})
-
 st.markdown(
     f"**風速:** {wind['speed']} m/s   **風向:** {wind['deg']}°   "
     f"**燃料:** {fuel_label}   **経過日数:** {days}日"
@@ -223,7 +246,7 @@ st.pydeck_chart(
 
 # --- Gemini要約レポート ---
 report = summarize_fire(
-    lat_c, lon_c, wind, fuel_label, days,
+    lat_c, lon_c, place_name, wind, fuel_label, days,
     base_radius, area_sqm, water_tons
 )
 st.markdown("## 🔥 Gemini 要約レポート")
