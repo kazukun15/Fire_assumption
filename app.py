@@ -1,16 +1,18 @@
 import streamlit as st
 import requests
-import math
-import pydeck as pdk
-import numpy as np
-from io import BytesIO
-from PIL import Image
 import csv
+import math
 import re
+import pydeck as pdk
+import folium
+from streamlit_folium import st_folium
+import numpy as np
+from io import StringIO, BytesIO
+from PIL import Image
 import google.generativeai as genai
 
 # --- ページ設定 ---
-st.set_page_config(page_title="火災拡大シミュレーション＋Gemini報告", layout="wide")
+st.set_page_config(page_title="火災シミュレーション＋双方向地点設定", layout="wide")
 
 # --- Secrets の読み込み ---
 MAPBOX_TOKEN        = st.secrets["mapbox"]["access_token"]
@@ -28,28 +30,33 @@ if "fire_location" not in st.session_state:
     st.session_state.fire_location = (34.25743760177552, 133.2043209338966)
 
 # --- サイドバー UI ---
-st.sidebar.header("🔥 シミュレーション設定")
-latlon_str = st.sidebar.text_input(
-    "発生地点 (Googleマップ形式: lat, lon)",
+st.sidebar.header("🔥 発生地点・設定")
+
+# (1) テキストでの緯度経度入力
+latlon_text = st.sidebar.text_input(
+    "発生地点 (lat, lon)",
     value=f"{st.session_state.fire_location[0]}, {st.session_state.fire_location[1]}"
 )
-if st.sidebar.button("地点を更新"):
-    m = re.match(r"\s*(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\s*", latlon_str)
+if st.sidebar.button("テキストで更新"):
+    m = re.match(r"\s*(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\s*", latlon_text)
     if m:
         st.session_state.fire_location = (float(m[1]), float(m[2]))
-        st.sidebar.success("発生地点を更新しました")
+        st.sidebar.success("発生地点をテキストで更新しました")
     else:
-        st.sidebar.error("入力形式エラー: 例 34.2574376, 133.2043209")
+        st.sidebar.error("形式エラー：例 34.2574376, 133.2043209")
 
+# (2) 画面クリックでの設定（後述の Folium マップ上で）
+st.sidebar.markdown("---")
+
+# 燃料特性・日数・FIRMSトグル
 fuel_map   = {"森林（高燃料）":1.2, "草地（中燃料）":1.0, "都市部（低燃料）":0.8}
 fuel_label = st.sidebar.selectbox("燃料特性", list(fuel_map.keys()))
 fuel_coeff = fuel_map[fuel_label]
 
-days = st.sidebar.slider("経過日数 (日)", 1, 7, 4)
-
+days       = st.sidebar.slider("経過日数 (日)", 1, 7, 4)
 show_firms = st.sidebar.checkbox("FIRMSデータを重ねる", value=False)
 
-# --- ヘルパー関数 ---
+# --- キャッシュ化データ取得関数 ---
 @st.cache_data(ttl=600)
 def get_weather(lat, lon):
     url = (
@@ -57,9 +64,9 @@ def get_weather(lat, lon):
         f"lat={lat}&lon={lon}&appid={OPENWEATHER_API_KEY}"
         "&units=metric&lang=ja"
     )
-    resp = requests.get(url, timeout=10)
-    resp.raise_for_status()
-    return resp.json()
+    r = requests.get(url, timeout=10)
+    r.raise_for_status()
+    return r.json()
 
 @st.cache_data(ttl=600)
 def get_firms_area(lat, lon, days, map_key):
@@ -91,10 +98,9 @@ def get_firms_area(lat, lon, days, map_key):
     return out
 
 def get_elevation(lat, lon):
-    """Mapbox Terrain‐RGBで標高取得"""
     zoom = 14
     tx = int((lon + 180) / 360 * 2**zoom)
-    ty = int((1 - math.log(math.tan(math.radians(lat)) + 1 / math.cos(math.radians(lat))) / math.pi) / 2 * 2**zoom)
+    ty = int((1 - math.log(math.tan(math.radians(lat)) + 1/math.cos(math.radians(lat))) / math.pi) / 2 * 2**zoom)
     url = f"https://api.mapbox.com/v4/mapbox.terrain-rgb/{zoom}/{tx}/{ty}.pngraw?access_token={MAPBOX_TOKEN}"
     r = requests.get(url, timeout=10)
     if r.status_code == 200:
@@ -118,75 +124,77 @@ def generate_terrain_polygon(lat, lon, radius, wind_dir):
 
 def summarize_fire(lat, lon, wind, fuel, days, radius, area, water):
     prompt = (
-        f"対象地点: 緯度{lat}, 経度{lon}\n"
-        f"風速: {wind['speed']}m/s, 風向: {wind['deg']}°\n"
-        f"燃料特性: {fuel}, 経過日数: {days}日\n"
-        f"延焼半径: {radius:.1f}m, 延焼面積: {area:.1f}m², 消水量: {water:.1f}t\n"
-        "これを一般の方向けにわかりやすく日本語で要約してください。"
+        f"地点: 緯度{lat}, 経度{lon}\n"
+        f"風速:{wind['speed']}m/s, 風向:{wind['deg']}°\n"
+        f"燃料:{fuel}, 経過日数:{days}日\n"
+        f"延焼半径:{radius:.1f}m, 延焼面積:{area:.1f}㎡, 消水量:{water:.1f}t\n"
+        "一般向けにわかりやすく要約してください。"
     )
     resp = MODEL.generate_content(prompt)
     return resp.text.strip()
 
-# --- メイン ---
-st.title("🔥 火災拡大シミュレーション with Gemini Report")
+# --- メイン画面：クリック可能 Folium マップ ---
+st.subheader("▶ 発生地点を地図でクリック設定")
+m = folium.Map(location=st.session_state.fire_location, zoom_start=12)
+map_data = st_folium(m, width=700, height=400, returned_objects=["last_clicked"])
+if map_data and map_data.get("last_clicked"):
+    lat = map_data["last_clicked"]["lat"]
+    lon = map_data["last_clicked"]["lng"]
+    st.session_state.fire_location = (lat, lon)
+    st.success(f"発生地点をマップで設定: {lat:.6f}, {lon:.6f}")
 
+# --- シミュレーション結果 ---
+st.subheader("🔥 火災シミュレーション結果")
 lat_c, lon_c = st.session_state.fire_location
 weather = get_weather(lat_c, lon_c)
 wind    = weather.get("wind", {"speed":0, "deg":0})
 
 st.markdown(
-    f"**風速:** {wind['speed']} m/s  **風向:** {wind['deg']}°  "
-    f"**燃料:** {fuel_label}  **経過日数:** {days}日"
+    f"**風速:** {wind['speed']} m/s   **風向:** {wind['deg']}°   "
+    f"**燃料:** {fuel_label}   **経過日数:** {days}日"
 )
 
-# レイヤー作成
-layers = []
+layers = [
+    pdk.Layer(
+        "ScatterplotLayer",
+        data=[{"position":[lon_c,lat_c]}],
+        get_position="position", get_color=[0,0,255], get_radius=4
+    )
+]
 
-# 発生地点マーカー（小さいピン）
-layers.append(pdk.Layer(
-    "ScatterplotLayer",
-    data=[{"position":[lon_c,lat_c]}],
-    get_position="position",
-    get_color=[0,0,255],
-    get_radius=4
-))
-
-# 延焼半径・面積・水量算出
 base_radius = (250 * fuel_coeff) + 10 * days * fuel_coeff
 area_sqm     = math.pi * base_radius**2
 water_tons   = (area_sqm / 10000) * 5
 
-# 地形に沿ったポリゴン
 polygon = generate_terrain_polygon(lat_c, lon_c, base_radius, wind["deg"])
-layers.append(pdk.Layer(
-    "PolygonLayer",
-    data=[{"polygon": polygon}],
-    get_polygon="polygon",
-    get_fill_color=[255,0,0,80],
-    extruded=False
-))
+layers.append(
+    pdk.Layer(
+        "PolygonLayer",
+        data=[{"polygon": polygon}],
+        get_polygon="polygon",
+        get_fill_color=[255,0,0,80],
+        extruded=False
+    )
+)
 
-# FIRMS ホットスポット
 if show_firms:
     spots = get_firms_area(lat_c, lon_c, days, FIRMS_MAP_KEY)
-    ds = []
+    pts = []
     for s in spots:
         c = min(max(int((s["bright"]-300)*2),0),255)
-        ds.append({
-            "position":[s["lon"], s["lat"]],
-            "color": [255,255-c,0]
-        })
-    layers.append(pdk.Layer(
-        "ScatterplotLayer",
-        data=ds,
-        get_position="position",
-        get_fill_color="color",
-        get_radius=6000,
-        pickable=False
-    ))
-    st.success(f"FIRMSスポット {len(spots)} 件表示")
+        pts.append({"position":[s["lon"],s["lat"]],"color":[255,255-c,0]})
+    layers.append(
+        pdk.Layer(
+            "ScatterplotLayer",
+            data=pts,
+            get_position="position",
+            get_fill_color="color",
+            get_radius=6000,
+            pickable=False
+        )
+    )
+    st.success(f"FIRMSスポット: {len(spots)} 件")
 
-# マップ描画
 view = pdk.ViewState(latitude=lat_c, longitude=lon_c, zoom=12, pitch=45)
 st.pydeck_chart(pdk.Deck(
     layers=layers,
@@ -199,9 +207,9 @@ report = summarize_fire(
     lat_c, lon_c, wind, fuel_label, days,
     base_radius, area_sqm, water_tons
 )
-st.markdown("## 🔥 Geminiによる火災予測レポート")
+st.markdown("## 🔥 Gemini 要約レポート")
 st.write(report)
 
-# 気象データ JSON
+# 生気象データ確認
 with st.expander("▼ 気象データ (JSON)"):
     st.json(weather)
