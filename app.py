@@ -12,7 +12,7 @@ from PIL import Image
 import google.generativeai as genai
 
 # --- ページ設定 ---
-st.set_page_config(page_title="火災シミュレーション＋双方向地点設定＋逆ジオコーディング＋Geminiレポート", layout="wide")
+st.set_page_config(page_title="火災シミュレーション＋楕円モデル＋双方向地点設定＋Geminiレポート", layout="wide")
 
 # --- Secrets の読み込み ---
 MAPBOX_TOKEN        = st.secrets["mapbox"]["access_token"]
@@ -26,30 +26,10 @@ MODEL = genai.GenerativeModel('gemini-1.5-flash')
 
 # --- セッションステート初期化 ---
 if "fire_location" not in st.session_state:
-    # 初期地点：愛媛県松山市付近
     st.session_state.fire_location = (34.25743760177552, 133.2043209338966)
 
-# --- リバースジオコーディング関数（Mapbox） ---
-@st.cache_data(ttl=3600)
-def get_place_name(lat, lon):
-    """Mapbox Geocoding APIで緯度経度から場所名を取得"""
-    url = (
-        f"https://api.mapbox.com/geocoding/v5/mapbox.places/"
-        f"{lon},{lat}.json"
-        f"?access_token={MAPBOX_TOKEN}"
-        f"&language=ja&limit=1"
-    )
-    res = requests.get(url, timeout=10)
-    if res.status_code == 200:
-        data = res.json()
-        features = data.get("features")
-        if features:
-            # 最上位フィーチャーの place_name を返す
-            return features[0].get("place_name", "")
-    return "不明な場所"
-
 # --- サイドバー UI ---
-st.sidebar.header("🔥 発生地点・設定")
+st.sidebar.header("🔥 発生地点・シミュレーション設定")
 
 # (1) テキスト入力による地点設定
 latlon_text = st.sidebar.text_input(
@@ -62,11 +42,9 @@ if st.sidebar.button("テキストで更新"):
         st.session_state.fire_location = (float(m[1]), float(m[2]))
         st.sidebar.success("発生地点をテキストで更新しました")
     else:
-        st.sidebar.error("形式エラー：例 34.2574376, 133.2043209338969")
+        st.sidebar.error("形式エラー：例 34.2574376, 133.2043209338966")
 
 st.sidebar.markdown("---")
-
-# (2) 燃料特性・経過日数・FIRMSトグル
 fuel_map   = {"森林（高燃料）":1.2, "草地（中燃料）":1.0, "都市部（低燃料）":0.8}
 fuel_label = st.sidebar.selectbox("燃料特性", list(fuel_map.keys()))
 fuel_coeff = fuel_map[fuel_label]
@@ -115,7 +93,6 @@ def get_firms_area(lat, lon, days, map_key):
             continue
     return out
 
-# --- 標高データ取得（Mapbox Terrain-RGB） ---
 def get_elevation(lat, lon):
     zoom = 14
     tx = int((lon + 180) / 360 * 2**zoom)
@@ -128,25 +105,31 @@ def get_elevation(lat, lon):
         return -10000 + ((arr[0]*256*256 + arr[1]*256 + arr[2]) * 0.1)
     return 0
 
-# --- 地形に沿った延焼範囲ポリゴン生成 ---
-def generate_terrain_polygon(lat, lon, radius, wind_dir):
-    deg_m = 1/111000
+# --- 楕円モデルによる延焼範囲生成 ---
+def generate_realistic_spread(lat, lon, base_radius, wind_speed, wind_dir, fuel_coeff):
+    a = base_radius * fuel_coeff * (1 + wind_speed / 3.0)
+    b = base_radius * fuel_coeff
+    deg_per_m = 1 / 111000
+    theta0 = math.radians(wind_dir)
     coords = []
-    for deg in np.linspace(wind_dir-90, wind_dir+90, 36):
-        rad = math.radians(deg)
-        dx = radius * math.sin(rad)
-        dy = radius * math.cos(rad)
-        plat = lat + dy * deg_m
-        plon = lon + dx * deg_m / math.cos(math.radians(lat))
-        elev = get_elevation(plat, plon) * 0.3
-        coords.append([plon, plat, elev])
+    steps = 60
+    for i in range(steps + 1):
+        t = 2 * math.pi * i / steps
+        x0 = a * math.cos(t)
+        y0 = b * math.sin(t)
+        x = x0 * math.cos(theta0) - y0 * math.sin(theta0)
+        y = x0 * math.sin(theta0) + y0 * math.cos(theta0)
+        lat_i = lat + (y * deg_per_m)
+        lon_i = lon + (x * deg_per_m) / math.cos(math.radians(lat))
+        elev = get_elevation(lat_i, lon_i) * 0.3
+        coords.append([lon_i, lat_i, elev])
     return coords
 
 # --- Gemini要約レポート生成 ---
 def summarize_fire(lat, lon, place, wind, fuel, days, radius, area, water):
     prompt = (
         f"以下は火災シミュレーションの結果です。\n"
-        f"- 発生地点: {place} (緯度{lat}, 経度{lon})\n"
+        f"- 発生地点: 緯度{lat}, 経度{lon}\n"
         f"- 風速: {wind['speed']} m/s, 風向: {wind['deg']}°\n"
         f"- 燃料特性: {fuel}\n"
         f"- 経過日数: {days}日\n"
@@ -174,81 +157,56 @@ if map_data and map_data.get("last_clicked"):
 # --- シミュレーション結果表示 ---
 st.subheader("🔥 火災シミュレーション結果")
 lat_c, lon_c = st.session_state.fire_location
-
-# 逆ジオコーディングで正式名称取得
-place_name = get_place_name(lat_c, lon_c)
-st.markdown(f"**発生地点:** {place_name}")
-
 weather = get_weather(lat_c, lon_c)
 wind    = weather.get("wind", {"speed":0, "deg":0})
+place = f"{lat_c:.6f}, {lon_c:.6f}"  # 逆ジオコーディング省略
+
 st.markdown(
+    f"**発生地点:** {place}  \n"
     f"**風速:** {wind['speed']} m/s   **風向:** {wind['deg']}°   "
     f"**燃料:** {fuel_label}   **経過日数:** {days}日"
 )
 
-# pydeckレイヤー準備
-layers = [
-    pdk.Layer(
-        "ScatterplotLayer",
-        data=[{"position":[lon_c,lat_c]}],
-        get_position="position",
-        get_color=[0,0,255],
-        get_radius=4
-    )
-]
+# レイヤー準備
+layers = [ pdk.Layer("ScatterplotLayer",
+    data=[{"position":[lon_c,lat_c]}],
+    get_position="position", get_color=[0,0,255], get_radius=4) ]
 
-# 延焼範囲計算
+# 延焼範囲
 base_radius = (250 * fuel_coeff) + 10 * days * fuel_coeff
 area_sqm     = math.pi * base_radius**2
 water_tons   = (area_sqm / 10000) * 5
+polygon = generate_realistic_spread(lat_c, lon_c, base_radius,
+                                    wind["speed"], wind["deg"], fuel_coeff)
+layers.append(pdk.Layer("PolygonLayer",
+    data=[{"polygon": polygon}],
+    get_polygon="polygon",
+    get_fill_color=[255,0,0,80],
+    extruded=False))
 
-# 地形沿いポリゴン
-polygon = generate_terrain_polygon(lat_c, lon_c, base_radius, wind["deg"])
-layers.append(
-    pdk.Layer(
-        "PolygonLayer",
-        data=[{"polygon": polygon}],
-        get_polygon="polygon",
-        get_fill_color=[255,0,0,80],
-        extruded=False
-    )
-)
-
-# FIRMSホットスポット表示
+# FIRMS
 if show_firms:
     spots = get_firms_area(lat_c, lon_c, days, FIRMS_MAP_KEY)
     pts = []
     for s in spots:
         c = min(max(int((s["bright"]-300)*2),0),255)
         pts.append({"position":[s["lon"],s["lat"]],"color":[255,255-c,0]})
-    layers.append(
-        pdk.Layer(
-            "ScatterplotLayer",
-            data=pts,
-            get_position="position",
-            get_fill_color="color",
-            get_radius=6000,
-            pickable=False
-        )
-    )
+    layers.append(pdk.Layer("ScatterplotLayer",
+        data=pts,get_position="position",get_fill_color="color",
+        get_radius=6000,pickable=False))
     st.success(f"FIRMSスポット: {len(spots)} 件表示")
 
 # 地図描画
 view = pdk.ViewState(latitude=lat_c, longitude=lon_c, zoom=12, pitch=45)
-st.pydeck_chart(
-    pdk.Deck(
-        layers=layers,
-        initial_view_state=view,
-        map_style="mapbox://styles/mapbox/satellite-streets-v11"
-    ),
-    use_container_width=True
-)
+st.pydeck_chart(pdk.Deck(layers=layers,
+    initial_view_state=view,
+    map_style="mapbox://styles/mapbox/satellite-streets-v11"),
+    use_container_width=True)
 
-# --- Gemini要約レポート ---
+# Gemini レポート
 report = summarize_fire(
-    lat_c, lon_c, place_name, wind, fuel_label, days,
-    base_radius, area_sqm, water_tons
-)
+    lat_c, lon_c, place, wind, fuel_label, days,
+    base_radius, area_sqm, water_tons)
 st.markdown("## 🔥 Gemini 要約レポート")
 st.write(report)
 
