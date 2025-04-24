@@ -12,7 +12,7 @@ from PIL import Image
 import google.generativeai as genai
 
 # --- ページ設定 ---
-st.set_page_config(page_title="火災シミュレーション＋双方向地点設定", layout="wide")
+st.set_page_config(page_title="火災シミュレーション＋双方向地点設定＋Geminiレポート", layout="wide")
 
 # --- Secrets の読み込み ---
 MAPBOX_TOKEN        = st.secrets["mapbox"]["access_token"]
@@ -30,9 +30,9 @@ if "fire_location" not in st.session_state:
     st.session_state.fire_location = (34.25743760177552, 133.2043209338966)
 
 # --- サイドバー UI ---
-st.sidebar.header("🔥 発生地点・設定")
+st.sidebar.header("🔥 発生地点・シミュレーション設定")
 
-# (1) テキストでの緯度経度入力
+# (1) テキスト入力による地点設定
 latlon_text = st.sidebar.text_input(
     "発生地点 (lat, lon)",
     value=f"{st.session_state.fire_location[0]}, {st.session_state.fire_location[1]}"
@@ -45,10 +45,9 @@ if st.sidebar.button("テキストで更新"):
     else:
         st.sidebar.error("形式エラー：例 34.2574376, 133.2043209")
 
-# (2) 画面クリックでの設定（後述の Folium マップ上で）
 st.sidebar.markdown("---")
 
-# 燃料特性・日数・FIRMSトグル
+# (2) 燃料特性・経過日数・FIRMSトグル
 fuel_map   = {"森林（高燃料）":1.2, "草地（中燃料）":1.0, "都市部（低燃料）":0.8}
 fuel_label = st.sidebar.selectbox("燃料特性", list(fuel_map.keys()))
 fuel_coeff = fuel_map[fuel_label]
@@ -72,7 +71,7 @@ def get_weather(lat, lon):
 def get_firms_area(lat, lon, days, map_key):
     delta = 0.5
     south, north = lat - delta, lat + delta
-    west, east   = lon - delta, lon + delta
+    west,  east  = lon - delta, lon + delta
     bbox = f"{west},{south},{east},{north}"
     url = (
         f"https://firms.modaps.eosdis.nasa.gov/api/area/"
@@ -97,6 +96,7 @@ def get_firms_area(lat, lon, days, map_key):
             continue
     return out
 
+# --- 標高データ取得（Mapbox Terrain-RGB） ---
 def get_elevation(lat, lon):
     zoom = 14
     tx = int((lon + 180) / 360 * 2**zoom)
@@ -109,6 +109,7 @@ def get_elevation(lat, lon):
         return -10000 + ((arr[0]*256*256 + arr[1]*256 + arr[2]) * 0.1)
     return 0
 
+# --- 地形に沿った延焼範囲ポリゴン生成 ---
 def generate_terrain_polygon(lat, lon, radius, wind_dir):
     deg_m = 1/111000
     coords = []
@@ -122,28 +123,36 @@ def generate_terrain_polygon(lat, lon, radius, wind_dir):
         coords.append([plon, plat, elev])
     return coords
 
+# --- Gemini要約レポート生成 ---
 def summarize_fire(lat, lon, wind, fuel, days, radius, area, water):
     prompt = (
-        f"地点: 緯度{lat}, 経度{lon}\n"
-        f"風速:{wind['speed']}m/s, 風向:{wind['deg']}°\n"
-        f"燃料:{fuel}, 経過日数:{days}日\n"
-        f"延焼半径:{radius:.1f}m, 延焼面積:{area:.1f}㎡, 消水量:{water:.1f}t\n"
-        "一般向けにわかりやすく要約してください。"
+        f"以下は火災シミュレーションの結果です。\n"
+        f"- 発生地点: 緯度{lat}, 経度{lon}\n"
+        f"- 風速: {wind['speed']} m/s, 風向: {wind['deg']}°\n"
+        f"- 燃料特性: {fuel}\n"
+        f"- 経過日数: {days}日\n"
+        f"- 延焼半径: {radius:.1f} m\n"
+        f"- 延焼面積: {area:.1f} ㎡\n"
+        f"- 必要放水量: {water:.1f} トン\n\n"
+        "これを踏まえ、以下を含む一般の方が理解しやすい日本語レポートを作成してください：\n"
+        "1. 効果的な消火方法（推奨装備・戦術）\n"
+        "2. 消火を重点的に行うべき場所（風下側要所、住宅密集地境界など）\n"
+        "3. 今後予想される火勢の動きやリスクの変化\n"
+        "4. 簡潔なまとめと提案\n"
     )
     resp = MODEL.generate_content(prompt)
     return resp.text.strip()
 
-# --- メイン画面：クリック可能 Folium マップ ---
+# --- メイン画面：Foliumクリックで地点設定 ---
 st.subheader("▶ 発生地点を地図でクリック設定")
 m = folium.Map(location=st.session_state.fire_location, zoom_start=12)
 map_data = st_folium(m, width=700, height=400, returned_objects=["last_clicked"])
 if map_data and map_data.get("last_clicked"):
-    lat = map_data["last_clicked"]["lat"]
-    lon = map_data["last_clicked"]["lng"]
+    lat, lon = map_data["last_clicked"]["lat"], map_data["last_clicked"]["lng"]
     st.session_state.fire_location = (lat, lon)
     st.success(f"発生地点をマップで設定: {lat:.6f}, {lon:.6f}")
 
-# --- シミュレーション結果 ---
+# --- シミュレーション結果表示 ---
 st.subheader("🔥 火災シミュレーション結果")
 lat_c, lon_c = st.session_state.fire_location
 weather = get_weather(lat_c, lon_c)
@@ -154,18 +163,23 @@ st.markdown(
     f"**燃料:** {fuel_label}   **経過日数:** {days}日"
 )
 
+# pydeckレイヤー準備
 layers = [
     pdk.Layer(
         "ScatterplotLayer",
         data=[{"position":[lon_c,lat_c]}],
-        get_position="position", get_color=[0,0,255], get_radius=4
+        get_position="position",
+        get_color=[0,0,255],
+        get_radius=4
     )
 ]
 
+# 延焼範囲計算
 base_radius = (250 * fuel_coeff) + 10 * days * fuel_coeff
 area_sqm     = math.pi * base_radius**2
 water_tons   = (area_sqm / 10000) * 5
 
+# 地形沿いポリゴン
 polygon = generate_terrain_polygon(lat_c, lon_c, base_radius, wind["deg"])
 layers.append(
     pdk.Layer(
@@ -177,6 +191,7 @@ layers.append(
     )
 )
 
+# FIRMSホットスポット表示
 if show_firms:
     spots = get_firms_area(lat_c, lon_c, days, FIRMS_MAP_KEY)
     pts = []
@@ -193,16 +208,20 @@ if show_firms:
             pickable=False
         )
     )
-    st.success(f"FIRMSスポット: {len(spots)} 件")
+    st.success(f"FIRMSスポット: {len(spots)} 件表示")
 
+# 地図描画
 view = pdk.ViewState(latitude=lat_c, longitude=lon_c, zoom=12, pitch=45)
-st.pydeck_chart(pdk.Deck(
-    layers=layers,
-    initial_view_state=view,
-    map_style="mapbox://styles/mapbox/satellite-streets-v11"
-), use_container_width=True)
+st.pydeck_chart(
+    pdk.Deck(
+        layers=layers,
+        initial_view_state=view,
+        map_style="mapbox://styles/mapbox/satellite-streets-v11"
+    ),
+    use_container_width=True
+)
 
-# Gemini レポート
+# --- Gemini要約レポート ---
 report = summarize_fire(
     lat_c, lon_c, wind, fuel_label, days,
     base_radius, area_sqm, water_tons
@@ -210,6 +229,6 @@ report = summarize_fire(
 st.markdown("## 🔥 Gemini 要約レポート")
 st.write(report)
 
-# 生気象データ確認
+# 生気象データ JSON
 with st.expander("▼ 気象データ (JSON)"):
     st.json(weather)
