@@ -1,26 +1,29 @@
 """
-Fire Spread Simulation (v3)
-- 常時マップ表示（分析開始前でも）
-- 「分析開始」ボタン導入
-- 複数の発火点（住所/緯度経度入力 + 地図クリックで追加）
-- 気象データ: Open‑Meteo を基本、失敗時は MET Norway (met.no) に自動フォールバック
-- 気象取得失敗時は手動設定（一定風向・風速）でシミュレーション可能
-- 予測: 風向・風速・降水を反映した簡易楕円モデル（15分ステップ）
-- 面積・半径等の時系列出力、CSVエクスポート
-- Gemini（任意）による結果要約（st.secrets["gemini"]["api_key"] がある場合のみ）
+Fire Spread Simulation — COMPLETE
 
-動作に必要なパッケージ（requirements.txt例）:
+要件対応:
+- マップは常時表示（分析前でも）
+- サイドバーに「🚀 分析開始」ボタン
+- 複数発火点（テキストで複数行入力）
+- 気象データ: Open‑Meteo → MET Norway (met.no) の順で自動フォールバック
+  （両方失敗時は手動パラメータ入力フォームで継続可能）
+- 時系列（15分刻み）で延焼ポリゴンを生成し、FoliumのTimestampedGeoJsonで再生
+  （各フレーム=1 Feature方式で安全）
+- 面積（㎡/ha）、最大半径、拡大速度の算出、CSVダウンロード
+- 任意: Gemini による管理文体サマリー（[gemini].api_key がある場合）
+
+requirements.txt 例:
 streamlit
 requests
 folium
-streamlit-folium
 pydeck
-shapely>=2.0  # 無ければ自動的に重なり面積は「単純合算」（推定）にフォールバック
-google-generativeai  # Gemini要約を使う場合
+pandas
+shapely>=2.0    # 任意（あると重なりの面積が正確）
+google-generativeai  # 任意（Gemini要約を使うとき）
 
 secrets.toml 例:
 [general]
-api_key = "<Google API Key (任意: Geocoding/Maps用)>"
+api_key = "<Google API Key (任意: Geocoding用)>"
 
 [gemini]
 api_key = "<Gemini API Key (任意)>"
@@ -37,8 +40,7 @@ import requests
 import streamlit as st
 import folium
 from folium import plugins
-from streamlit_folium import st_folium
-import pydeck as pdk
+import pandas as pd
 
 # shapely は任意
 try:
@@ -177,7 +179,6 @@ def fetch_weather_metno(lat: float, lon: float, total_hours: int):
             details = item.get("data", {}).get("instant", {}).get("details", {})
             wms = details.get("wind_speed")  # m/s
             wdd = details.get("wind_from_direction")  # degrees
-            # 降水は next_1_hours→details→precipitation_amount など（無い場合は0）
             pr = 0.0
             nxt = item.get("data", {}).get("next_1_hours")
             if nxt and "details" in nxt:
@@ -209,42 +210,16 @@ def fetch_weather_metno(lat: float, lon: float, total_hours: int):
         return None
 
 
-def fetch_weather(lat: float, lon: float, total_hours: int, source: str):
+def fetch_weather_auto(lat: float, lon: float, total_hours: int, source: str):
     """選択ソースに従って取得。AUTO は Open‑Meteo→met.no の順に試行。"""
     if source == "Open‑Meteo":
         return fetch_weather_openmeteo(lat, lon, total_hours)
     if source == "MET Norway (met.no)":
         return fetch_weather_metno(lat, lon, total_hours)
-    # AUTO
     data = fetch_weather_openmeteo(lat, lon, total_hours)
     if data:
         return data
     return fetch_weather_metno(lat, lon, total_hours)
-
-
-@st.cache_data(show_spinner=False)
-def get_timezone_offset(lat: float, lon: float) -> Tuple[int, str]:
-    api_key = _get_google_api_key()
-    if api_key:
-        try:
-            timestamp = int(datetime.now(timezone.utc).timestamp())
-            url = (
-                f"https://maps.googleapis.com/maps/api/timezone/json?location={lat:.6f},{lon:.6f}&timestamp={timestamp}&key={api_key}"
-            )
-            r = requests.get(url, timeout=15).json()
-            if r.get("status") == "OK":
-                return int(r.get("rawOffset", 0)) + int(r.get("dstOffset", 0)), r.get("timeZoneId", "")
-        except Exception:
-            pass
-    # フォールバック（Open‑Meteo）
-    try:
-        r = requests.get(
-            f"https://api.open-meteo.com/v1/timezone?latitude={lat:.6f}&longitude={lon:.6f}",
-            timeout=15,
-        ).json()
-        return int(r.get("utc_offset_seconds", 0)), r.get("timezone", "")
-    except Exception:
-        return 0, ""
 
 
 # ---------------------------------
@@ -282,7 +257,7 @@ def simulate_fire_single(lat: float, lon: float, hours_list, wind_list, dir_list
         frame_dir.append(dir_list[h + 1])
         frame_precip.append(precip_list[h + 1])
 
-    polygons: List[List[List[float]]] = []  # 各フレームの [ [lon,lat], ... ]
+    polygons: List[List[List[float]]]= []  # 各フレームの [ [lon,lat], ... ]
     for idx, t in enumerate(frame_times):
         t_hours = (t - frame_times[0]).total_seconds() / 3600.0
         precip_factor = max(1.0 / (1.0 + frame_precip[idx]), 0.1)
@@ -291,6 +266,7 @@ def simulate_fire_single(lat: float, lon: float, hours_list, wind_list, dir_list
         S_factor = 1.0 + k * frame_wind[idx]
         U_factor = max(1.0 - k * frame_wind[idx], 0.0)
         cross_factor = max(1.0 - cross_k * frame_wind[idx], 0.3)
+
         if idx == 0:
             R_down = R_up = R_cross = 20.0
         else:
@@ -298,6 +274,7 @@ def simulate_fire_single(lat: float, lon: float, hours_list, wind_list, dir_list
             R_down = effective_base * S_factor * time_seconds
             R_up   = effective_base * U_factor * time_seconds
             R_cross = effective_base * cross_factor * time_seconds
+
         front_points, back_points = [], []
         for j in range(31):
             alpha = -math.pi/2 + j * (math.pi / 30)
@@ -310,7 +287,7 @@ def simulate_fire_single(lat: float, lon: float, hours_list, wind_list, dir_list
         poly_local = front_points + back_points
         if poly_local[0] == poly_local[-1]:
             poly_local = poly_local[:-1]
-        spread_dir = (frame_dir[idx] + 180.0) % 360.0
+        spread_dir = (dir_list[min(idx,len(dir_list)-1)] + 180.0) % 360.0
         theta = math.radians(spread_dir)
         poly_coords = []  # [lon, lat]
         for (x, y) in poly_local:
@@ -325,8 +302,21 @@ def simulate_fire_single(lat: float, lon: float, hours_list, wind_list, dir_list
     return frame_times, polygons, frame_precip
 
 
+def build_timestamped_polygon_features(frame_times: List[datetime], per_frame_polygons: List[List[List[float]]], color="red"):
+    features = []
+    for i, poly in enumerate(per_frame_polygons):
+        features.append({
+            "type": "Feature",
+            "geometry": {"type": "Polygon", "coordinates": [poly]},
+            "properties": {
+                "times": [frame_times[i].strftime("%Y-%m-%dT%H:%M:%SZ")],
+                "style": {"color": color, "weight": 1, "fillColor": color, "fillOpacity": 0.35},
+            },
+        })
+    return features
+
+
 def polygon_area_m2(poly_lonlat: List[List[float]], ref_lat: float, ref_lon: float) -> float:
-    # 近似: メルカトルではなく単純換算（小領域想定）
     coords_xy = []
     for lonp, latp in poly_lonlat:
         dx = (lonp - ref_lon) * math.cos(math.radians(ref_lat)) * 111_320.0
@@ -340,33 +330,22 @@ def polygon_area_m2(poly_lonlat: List[List[float]], ref_lat: float, ref_lon: flo
     return abs(area) / 2.0
 
 
-def union_area_m2(polys_lonlat: List[List[List[float]]]) -> float:
+def union_area_m2(polys_lonlat: List[List[List[float]]], ref_lat: float, ref_lon: float) -> float:
     if SHAPELY_OK:
         try:
             shp_polys = []
             for coords in polys_lonlat:
-                shp_polys.append(Polygon([(x, y) for x, y in coords]))  # (lon,lat)
+                pts = [(
+                    (lon - ref_lon) * math.cos(math.radians(ref_lat)) * 111_320.0,
+                    (lat - ref_lat) * 110_540.0
+                ) for lon, lat in coords]
+                shp_polys.append(Polygon(pts))
             unioned = unary_union(shp_polys)
-            # 緯度依存換算のため代表緯度を使う近似（厳密には投影が必要）
-            # ここでは各リングを線形換算する簡易法に留める
-            if unioned.is_empty:
-                return 0.0
-            def ring_area_m2(ring):
-                pts = list(ring.coords)
-                ref_lat = sum(p[1] for p in pts) / len(pts)
-                ref_lon = sum(p[0] for p in pts) / len(pts)
-                return polygon_area_m2([[p[0], p[1]] for p in pts], ref_lat, ref_lon)
-            if unioned.geom_type == 'Polygon':
-                return ring_area_m2(unioned.exterior) - sum(ring_area_m2(i) for i in unioned.interiors)
-            elif unioned.geom_type == 'MultiPolygon':
-                s = 0.0
-                for g in unioned.geoms:
-                    s += ring_area_m2(g.exterior) - sum(ring_area_m2(i) for i in g.interiors)
-                return s
+            return float(unioned.area)
         except Exception:
             pass
     # フォールバック: 単純合算（重なり無視）
-    return sum(polygon_area_m2(poly, ref_lat=poly[0][1], ref_lon=poly[0][0]) for poly in polys_lonlat)
+    return sum(polygon_area_m2(poly, ref_lat=ref_lat, ref_lon=ref_lon) for poly in polys_lonlat)
 
 
 # ---------------------------------
@@ -374,10 +353,11 @@ def union_area_m2(polys_lonlat: List[List[List[float]]]) -> float:
 # ---------------------------------
 
 st.sidebar.header("シミュレーション設定")
-col_a, col_b = st.sidebar.columns(2)
-with col_a:
-    hours = st.number_input("予測時間 (h)", min_value=1, max_value=24, value=6, step=1)
-with col_b:
+location_inputs: List[str] = st.sidebar.text_area("火災発生地点（複数行可）", "Osaka, Japan").splitlines()
+col1, col2 = st.sidebar.columns(2)
+with col1:
+    total_hours = st.number_input("予測時間 (h)", min_value=1, max_value=24, value=6)
+with col2:
     data_source = st.selectbox("気象データソース", ["AUTO", "Open‑Meteo", "MET Norway (met.no)"])
 
 fuel_options = {"草地": 0.6, "森林": 0.3, "低木地帯": 0.4, "都市部": 0.2}
@@ -388,219 +368,146 @@ if scenario == "強風":
     wind_factor = 2.0
 elif scenario == "初期消火":
     wind_factor = 1.0
-    hours = min(hours, 3)
+    total_hours = min(total_hours, 3)
 else:
     wind_factor = 1.0
 
 show_rain = st.sidebar.checkbox("雨雲オーバーレイ", value=True)
-use_gemini = st.sidebar.checkbox("Geminiで結果要約を付与", value=False)
-run_clicked = st.sidebar.button("🚀 分析開始")
-reset_points = st.sidebar.button("🧹 発火点リセット")
+use_gemini = st.sidebar.checkbox("Geminiで要約", value=False)
+
+analyze = st.sidebar.button("🚀 分析開始")
 
 # ---------------------------------
-# 発火点の入力
+# 常時マップ表示（入力が住所でも可能な限りジオコーディングしてプロット）
 # ---------------------------------
 
-if "ignitions" not in st.session_state:
-    st.session_state.ignitions: List[Dict] = []
+# 代表中心：最初に解決できた地点、なければ大阪
+center_lat, center_lon = 34.6937, 135.5023
+markers: List[Tuple[float,float,str]] = []
+for loc in location_inputs:
+    loc = loc.strip()
+    if not loc:
+        continue
+    lat, lon = geocode_one(loc)
+    if lat is not None and lon is not None:
+        if len(markers) == 0:
+            center_lat, center_lon = lat, lon
+        markers.append((lat, lon, loc))
 
-if reset_points:
-    st.session_state.ignitions = []
+m = folium.Map(location=[center_lat, center_lon], zoom_start=10, tiles="OpenStreetMap", width="100%", height="600")
+for i, (lat, lon, loc) in enumerate(markers, 1):
+    folium.Marker([lat, lon], tooltip=f"発火点 {i}: {loc}", icon=folium.Icon(color="red", icon="fire", prefix="fa")).add_to(m)
 
-with st.expander("発火点の追加（住所/緯度,経度を1行1点で）"):
-    default_text = "Osaka, Japan" if not st.session_state.ignitions else ""
-    txt = st.text_area("住所または緯度,経度 (例: 34.68, 135.52)", value=default_text, height=80)
-    if st.button("➕ テキストから発火点を追加"):
-        new_lines = [s.strip() for s in txt.splitlines() if s.strip()]
-        added = 0
-        for line in new_lines:
-            lat, lon = geocode_one(line)
-            if lat is not None and lon is not None:
-                st.session_state.ignitions.append({"lat": lat, "lon": lon, "label": line})
-                added += 1
-        st.success(f"{added} 点を追加しました。")
-
-# ---------------------------------
-# 常時マップ表示 + クリック追加
-# ---------------------------------
-
-# マップの中心: 既存点の平均、無ければ大阪
-if st.session_state.ignitions:
-    avg_lat = sum(p["lat"] for p in st.session_state.ignitions) / len(st.session_state.ignitions)
-    avg_lon = sum(p["lon"] for p in st.session_state.ignitions) / len(st.session_state.ignitions)
-else:
-    avg_lat, avg_lon = 34.6937, 135.5023  # Osaka
-
-m = folium.Map(location=[avg_lat, avg_lon], zoom_start=11, tiles="OpenStreetMap", width="100%", height="600")
-
-# 既存発火点を表示
-for i, pnt in enumerate(st.session_state.ignitions, 1):
-    folium.Marker([pnt["lat"], pnt["lon"]], tooltip=f"発火点 {i}: {pnt.get('label','')}",
-                  icon=folium.Icon(color="red", icon="fire", prefix="fa")).add_to(m)
-
-# クリックで追加できるよう、st_folium を用いる
-map_ret = st_folium(m, height=600, width=None, returned_objects=["last_clicked"], use_container_width=True)
-if map_ret and map_ret.get("last_clicked"):
-    lc = map_ret["last_clicked"]
-    lat, lon = lc.get("lat"), lc.get("lng")
-    if lat and lon:
-        st.session_state.ignitions.append({"lat": lat, "lon": lon, "label": f"clicked({lat:.5f},{lon:.5f})"})
-        st.toast("発火点を追加しました（マップクリック）", icon="➕")
+st.components.v1.html(m._repr_html_(), height=600, scrolling=False)
 
 # ---------------------------------
-# 分析（ボタン押下時のみ）
+# 分析（ボタン押下時）
 # ---------------------------------
 
-results_table = None
-if run_clicked:
-    if not st.session_state.ignitions:
-        st.warning("発火点を1つ以上追加してください。")
-    else:
-        # 単一点の代表緯度経度で気象を取得（簡易仕様）。必要であれば各点ごとに取得に拡張可。
-        rep = st.session_state.ignitions[0]
-        wx = fetch_weather(rep["lat"], rep["lon"], int(hours), data_source)
-        manual_used = False
+if analyze:
+    if not markers:
+        st.warning("発火点を1つ以上入力してください。")
+        st.stop()
+
+    all_features = []  # TimestampedGeoJson 用
+    per_frame_polys: List[List[List[List[float]]]] = []  # frame -> [polys]
+    frame_times_ref: List[datetime] = []
+    frame_precip_ref: List[float] = []
+
+    for idx, (lat, lon, loc) in enumerate(markers, 1):
+        wx = fetch_weather_auto(lat, lon, int(total_hours), data_source)
         if not wx:
-            st.warning("気象データの取得に失敗しました。手動設定を使用します。")
-            # 手動: 一定風速・風向・降水
-            with st.form("manual_wind_form"):
+            st.warning(f"気象データを取得できませんでした: {loc}。手動設定で継続します。")
+            with st.form(f"manual_wind_form_{idx}"):
                 c1, c2, c3 = st.columns(3)
                 with c1:
-                    man_wspd = st.number_input("風速 (m/s)", min_value=0.0, max_value=60.0, value=3.0, step=0.5)
+                    man_wspd = st.number_input(f"[{loc}] 風速 (m/s)", min_value=0.0, max_value=60.0, value=3.0, step=0.5)
                 with c2:
-                    man_wdir = st.number_input("風向 (度: 北=0, 東=90)", min_value=0.0, max_value=359.9, value=270.0, step=1.0)
+                    man_wdir = st.number_input(f"[{loc}] 風向 (度: 北=0, 東=90)", min_value=0.0, max_value=359.9, value=270.0, step=1.0)
                 with c3:
-                    man_prcp = st.number_input("降水 (mm/h)", min_value=0.0, max_value=200.0, value=0.0, step=0.5)
+                    man_prcp = st.number_input(f"[{loc}] 降水 (mm/h)", min_value=0.0, max_value=200.0, value=0.0, step=0.5)
                 submitted = st.form_submit_button("この設定で続行")
             if not submitted:
-                st.stop()
+                continue
             now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-            hours_list = [now + timedelta(hours=i) for i in range(int(hours) + 1)]
+            hours_list = [now + timedelta(hours=i) for i in range(int(total_hours) + 1)]
             wind_list  = [man_wspd for _ in hours_list]
             dir_list   = [man_wdir for _ in hours_list]
             precip_list= [man_prcp for _ in hours_list]
-            manual_used = True
         else:
             hours_list, wind_list, dir_list, precip_list = wx
 
-        # シミュレーション: 各発火点のポリゴン列を計算
-        all_polys_by_frame: List[List[List[List[float]]]] = []  # frame -> list(polys) -> [ [lon,lat]... ]
-        frame_times_ref: List[datetime] = []
-        frame_precip_ref: List[float] = []
-        for idx_pt, pnt in enumerate(st.session_state.ignitions):
-            ftimes, polys, fprec = simulate_fire_single(
-                pnt["lat"], pnt["lon"], hours_list, wind_list, dir_list, precip_list,
-                base_speed=base_speed, wind_factor=wind_factor
-            )
-            if idx_pt == 0:
-                frame_times_ref = ftimes
-                frame_precip_ref = fprec
-                all_polys_by_frame = [[poly] for poly in polys]
-            else:
-                # 既存フレームと同数前提（時刻共通）。
-                for i_f in range(len(polys)):
-                    all_polys_by_frame[i_f].append(polys[i_f])
+        ftimes, polys, fprec = simulate_fire_single(lat, lon, hours_list, wind_list, dir_list, precip_list,
+                                                    base_speed=base_speed, wind_factor=wind_factor)
+        # 参照フレーム
+        if not frame_times_ref:
+            frame_times_ref = ftimes
+            frame_precip_ref = fprec
+            per_frame_polys = [[polys[i]] for i in range(len(polys))]
+        else:
+            # 同数前提（異なる場合は切り詰め）
+            L = min(len(per_frame_polys), len(polys))
+            for i in range(L):
+                per_frame_polys[i].append(polys[i])
 
-        # 統合表示用GeoJSON（各フレームで MultiPolygon）
-        frame_iso = [dt.strftime("%Y-%m-%dT%H:%M:%SZ") for dt in frame_times_ref]
-        features = []
-        features.append({
-            "type": "Feature",
-            "geometry": {
-                "type": "MultiPolygon",
-                "coordinates": [[poly] for poly in all_polys_by_frame[0]] if all_polys_by_frame else []
-            },
-            "properties": {
-                "times": frame_iso,
-                "style": {"color": "red", "weight": 1, "fillColor": "red", "fillOpacity": 0.35},
-            },
-        })
+        # 1点分の時系列 Feature を作成
+        all_features.extend(build_timestamped_polygon_features(ftimes, polys, color="red"))
 
-        # 降雨クラウド（時間単位）
-        if show_rain:
-            hours_iso = [dt.strftime("%Y-%m-%dT%H:%M:%SZ") for dt in hours_list]
-            for i, rain_val in enumerate(precip_list):
-                if rain_val and rain_val > 0:
-                    cloud_radius = 5000.0 + rain_val * 1000.0
-                    circle_points = []
-                    num_points = 36
-                    for deg in range(0, 360, int(360/num_points)):
-                        rad = math.radians(deg)
-                        east_off = cloud_radius * math.cos(rad)
-                        north_off = cloud_radius * math.sin(rad)
-                        dlat = north_off / 110_540.0
-                        dlon = east_off / (111_320.0 * math.cos(math.radians(avg_lat)))
-                        circle_points.append([avg_lon + dlon, avg_lat + dlat])
-                    circle_points.append(circle_points[0])
-                    features.append({
-                        "type": "Feature",
-                        "geometry": {"type": "Polygon", "coordinates": [circle_points]},
-                        "properties": {
-                            "times": [hours_iso[i]],
-                            "style": {"color": "blue", "weight": 0, "fillColor": "blue", "fillOpacity": 0.2},
-                        },
-                    })
+        # 静的な最終ポリゴンも参考表示
+        folium.Polygon(polys[-1], color="red", weight=2, fill=True, fill_opacity=0.25,
+                       tooltip=f"最終推定範囲: {loc}").add_to(m)
 
-        # 時系列の面積・最大半径などを算出
+    # 時系列アニメーションマップ
+    if all_features:
+        m_anim = folium.Map(location=[center_lat, center_lon], zoom_start=10, tiles="OpenStreetMap", width="100%", height="600")
+        plugins.TimestampedGeoJson(
+            {"type": "FeatureCollection", "features": all_features},
+            period="PT15M", duration="PT15M", add_last_point=False,
+            auto_play=True, loop=True, loop_button=True, max_speed=10, progress_bar=True
+        ).add_to(m_anim)
+        st.markdown("### 時系列アニメーション（解析結果）")
+        st.components.v1.html(m_anim._repr_html_(), height=600, scrolling=False)
+
+    # 指標の算出（union 面積、最大半径、拡大速度）
+    if per_frame_polys:
         rows = []
-        for i_f, polys in enumerate(all_polys_by_frame):
-            # union 面積
-            area_m2 = union_area_m2(polys)
-            # 最大半径（各ポリゴンの任意代表点からの最大距離として近似: 中心は代表点=最初の発火点）
-            # より厳密には各発火点ごとに中心を変えるべきだが、ここでは代表点基準の簡易実装
-            rep_lat, rep_lon = st.session_state.ignitions[0]["lat"], st.session_state.ignitions[0]["lon"]
+        ref_lat, ref_lon = markers[0][0], markers[0][1]
+        for i in range(len(per_frame_polys)):
+            polys = per_frame_polys[i]
+            area_m2 = union_area_m2(polys, ref_lat, ref_lon)
+            # 最大半径（代表中心からの最大距離）
             max_r = 0.0
             for poly in polys:
                 for lonp, latp in poly:
-                    dx = (lonp - rep_lon) * math.cos(math.radians(rep_lat)) * 111_320.0
-                    dy = (latp - rep_lat) * 110_540.0
-                    dist = (dx*dx + dy*dy) ** 0.5
+                    dx = (lonp - ref_lon) * math.cos(math.radians(ref_lat)) * 111_320.0
+                    dy = (latp - ref_lat) * 110_540.0
+                    dist = (dx * dx + dy * dy) ** 0.5
                     if dist > max_r:
                         max_r = dist
             rows.append({
-                "utc_time": frame_times_ref[i_f].strftime("%Y-%m-%d %H:%M"),
-                "frame_index": i_f,
+                "utc_time": frame_times_ref[i].strftime("%Y-%m-%d %H:%M"),
+                "frame_index": i,
                 "area_m2": area_m2,
-                "area_ha": area_m2/10_000.0,
+                "area_ha": area_m2 / 10_000.0,
                 "max_radius_m": max_r,
-                "precip_mm_h": frame_precip_ref[i_f] if i_f < len(frame_precip_ref) else None,
+                "precip_mm_h": frame_precip_ref[i] if i < len(frame_precip_ref) else None,
             })
 
-        # 可視化（TimestampedGeoJson を既存マップに重畳）
-        m2 = folium.Map(location=[avg_lat, avg_lon], zoom_start=11, tiles="OpenStreetMap", width="100%", height="600")
-        for i, pnt in enumerate(st.session_state.ignitions, 1):
-            folium.Marker([pnt["lat"], pnt["lon"]], tooltip=f"発火点 {i}: {pnt.get('label','')}",
-                          icon=folium.Icon(color="red", icon="fire", prefix="fa")).add_to(m2)
-
-        plugins.TimestampedGeoJson(
-            {"type": "FeatureCollection", "features": features},
-            period="PT15M", duration="PT1H", add_last_point=False, auto_play=True,
-            loop=True, loop_button=True, max_speed=10, progress_bar=True,
-        ).add_to(m2)
-
-        st.markdown("### 解析結果（マップ）")
-        st_folium(m2, height=600, width=None, use_container_width=True)
-
-        # サマリー
         final = rows[-1]
         st.markdown(
-            f"**最終フレーム**  "+
-            f"面積: {final['area_ha']:.2f} ha（{final['area_m2']:.0f} ㎡） / 最大半径: {final['max_radius_m']:.0f} m"
+            f"**最終フレーム** — 面積: {final['area_ha']:.2f} ha（{final['area_m2']:.0f} ㎡） / 最大半径: {final['max_radius_m']:.0f} m"
         )
 
-        # 拡大速度（m^2/h の近似）
+        # 拡大速度（m^2/h の近似、直近1時間＝4コマ）
         if len(rows) >= 5:
             dt_hours = 0.25  # 15分
             dA = rows[-1]['area_m2'] - rows[-5]['area_m2']
-            growth_rate = dA / (4 * dt_hours)  # m2/h
+            growth_rate = dA / (4 * dt_hours)
             st.markdown(f"推定面積拡大速度: **{growth_rate:,.0f} m²/h**")
 
-        # CSV エクスポート
-        import pandas as pd
         df = pd.DataFrame(rows)
-        csv = df.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("⬇️ 面積・半径の時系列CSVをダウンロード", data=csv, file_name="fire_growth_timeseries.csv", mime="text/csv")
-        results_table = df
+        st.download_button("⬇️ 面積・半径の時系列CSVをダウンロード", data=df.to_csv(index=False).encode('utf-8-sig'),
+                           file_name="fire_growth_timeseries.csv", mime="text/csv")
 
         # Gemini 要約（任意）
         if use_gemini:
@@ -613,18 +520,18 @@ if run_clicked:
                     prompt = {
                         "scenario": scenario,
                         "fuel_type": fuel_type,
-                        "hours": hours,
-                        "points": st.session_state.ignitions,
-                        "final_area_m2": final['area_m2'],
-                        "final_area_ha": final['area_ha'],
-                        "max_radius_m": final['max_radius_m'],
-                        "growth_table_head": rows[:8],
+                        "hours": int(total_hours),
+                        "points": [{"lat": a, "lon": b, "label": c} for a, b, c in markers],
+                        "final_area_m2": float(final['area_m2']),
+                        "final_area_ha": float(final['area_ha']),
+                        "max_radius_m": float(final['max_radius_m']),
+                        "growth_rate_m2ph": float(growth_rate) if len(rows) >= 5 else None,
                     }
                     resp = model.generate_content([
-                        "以下のJSONは火災延焼予測の結果です。短く行政文体でサマリーを書いてください。重要指標(面積, 最大半径, 拡大速度)を数値で示し、根拠の要約も添えてください。",
+                        "以下のJSONは火災延焼予測の結果です。行政文体で簡潔にサマリーを書いてください。重要指標(面積, 最大半径, 拡大速度)を数値で示し、根拠も簡潔に示してください。",
                         json.dumps(prompt, ensure_ascii=False),
                     ])
-                    st.markdown("### Gemini 要約")
+                    st.markdown("### 要約 (Gemini)")
                     st.write(resp.text)
                 except Exception as e:
                     st.info(f"Gemini要約は利用できませんでした: {e}")
@@ -632,26 +539,13 @@ if run_clicked:
                 st.info("GeminiのAPIキーが設定されていません（[gemini].api_key）。")
 
 # ---------------------------------
-# 3Dビュー（任意: 参考表示）
+# 補足: 凡例
 # ---------------------------------
-with st.expander("3Dビュー (任意)"):
-    if st.session_state.ignitions:
-        view_state = pdk.ViewState(latitude=avg_lat, longitude=avg_lon, zoom=11, pitch=45)
-        layers = []
-        for pnt in st.session_state.ignitions:
-            layers.append(pdk.Layer(
-                "ScatterplotLayer",
-                data=[{"lon": pnt["lon"], "lat": pnt["lat"]}],
-                get_position="[lon, lat]",
-                get_radius=100,
-                get_color="[255,0,0]",
-            ))
-        deck = pdk.Deck(map_provider="mapbox", map_style="light-v9", layers=layers, initial_view_state=view_state, height=400)
-        st.pydeck_chart(deck, use_container_width=True)
-    else:
-        st.caption("発火点を追加すると3D表示できます。")
-
-# ---------------------------------
-# ヒント
-# ---------------------------------
-st.info("マップは常時表示されます。発火点は\"住所/緯度経度入力\"または\"地図クリック\"で追加し、\"分析開始\"ボタンで解析します。気象取得に失敗した場合でも手動設定で解析可能です。")
+legend_html = """
+<div style="position: fixed; bottom: 50px; right: 50px; z-index: 9999; background: white; border: 1px solid #888; padding: 10px; opacity: 0.9; font-size: 13px;">
+<b>凡例</b><br>
+<span style="display:inline-block;width:12px;height:12px;background:red;margin-right:6px;"></span> 推定延焼範囲（時系列）<br>
+<i class="fa fa-fire" style="color:red;margin-right:6px;"></i> 発火点
+</div>
+"""
+m.get_root().html.add_child(folium.Element(legend_html))
