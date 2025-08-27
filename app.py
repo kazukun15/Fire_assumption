@@ -20,31 +20,27 @@ st.set_page_config(page_title="Fire Spread Simulation", layout="wide")
 # ============================
 
 def _get_google_api_key() -> Optional[str]:
-    """Robustly fetch Google API key from Streamlit secrets.
+    """Fetch Google API key robustly.
     Accepts either:
       [general]\napi_key = "..."
-    or
-      api_key = "..."
-    Returns None if not found.
+    or top-level: api_key = "..."
+    Or env var GOOGLE_API_KEY as fallback.
     """
     try:
-        # Preferred: [general].api_key
         if "general" in st.secrets and "api_key" in st.secrets["general"]:
             return st.secrets["general"]["api_key"]
     except Exception:
         pass
     try:
-        # Fallback: top-level api_key
         if "api_key" in st.secrets:
             return st.secrets["api_key"]
     except Exception:
         pass
-    # Also allow env var override for local debug
     return os.environ.get("GOOGLE_API_KEY")
 
 
 def _headers_for_osm():
-    # Nominatim requires a valid User-Agent and should be used politely
+    # Nominatim利用時の推奨ヘッダ（任意の連絡先に変更してください）
     return {"User-Agent": "fire-spread-sim/1.0 (contact: example@example.com)"}
 
 
@@ -55,20 +51,19 @@ def _headers_for_osm():
 @st.cache_data(show_spinner=False)
 def geocode_address(address: str) -> Tuple[Optional[float], Optional[float]]:
     """Geocode an address to (lat, lon).
-    Tries Google Geocoding API if key is available. Otherwise falls back to OSM Nominatim.
+    - Try parsing "lat, lon" directly
+    - Try Google Geocoding API if key exists
+    - Fallback to OSM Nominatim
     """
-    api_key = _get_google_api_key()
-
-    # If input already looks like "lat, lon", parse directly (no API calls)
+    # If input already looks like "lat, lon"
     try:
         parts = [p.strip() for p in address.split(",")]
         if len(parts) == 2:
-            lat_val = float(parts[0])
-            lon_val = float(parts[1])
-            return lat_val, lon_val
+            return float(parts[0]), float(parts[1])
     except Exception:
         pass
 
+    api_key = _get_google_api_key()
     if api_key:
         try:
             addr_enc = urllib.parse.quote(address, safe="")
@@ -156,8 +151,7 @@ def get_timezone_offset(lat: float, lon: float) -> Tuple[int, str]:
     try:
         url = f"https://api.open-meteo.com/v1/timezone?latitude={lat:.6f}&longitude={lon:.6f}"
         r = requests.get(url, timeout=15).json()
-        # offset in seconds = gmt_offset_seconds
-        offset = int(r.get("gmt_offset", 0) * 3600) if "gmt_offset" in r else int(r.get("utc_offset_seconds", 0))
+        offset = int(r.get("utc_offset_seconds", 0))
         tz = r.get("timezone", "")
         return offset, tz
     except Exception:
@@ -390,7 +384,7 @@ if display_mode == "2D 地図":
         <b>凡例</b><br>
         <i style="display:inline-block;width:12px;height:12px;background:red;margin-right:5px;"></i> 火災延焼範囲<br>
         <i style="display:inline-block;width:12px;height:12px;background:blue;opacity:0.5;margin-right:5px;"></i> 雨雲領域<br>
-        <i class="fa fa-fire" style="color:red;margin-right:5px;"></i> 火災発生地点
+        <i class=\"fa fa-fire\" style=\"color:red;margin-right:5px;\"></i> 火災発生地点
     </div>
     """
     m.get_root().html.add_child(folium.Element(legend_html))
@@ -461,9 +455,7 @@ else:
             )
             layers.append(cloud_layer)
 
-    # Use a safe default view; computing viewport can be fragile across pydeck versions
     view_state = pdk.ViewState(latitude=lat, longitude=lon, zoom=12, pitch=45, bearing=0)
-
     deck = pdk.Deck(
         map_provider="google_maps",
         api_keys={"google_maps": _get_google_api_key() or ""},
