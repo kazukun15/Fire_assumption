@@ -1,11 +1,7 @@
-streamlit>=1.14.0
-streamlit-folium>=0.18.0
-folium>=0.12.1
-pydeck
+streamlit
 requests
-demjson3
-shapely
-geopandas
+folium
+streamlit-folium
+pydeck
+shapely>=2.0
 google-generativeai
-numpy
-Pillow
