@@ -4,10 +4,10 @@ Fire Spread Simulator Pro (Streamlit + Gemini 2.5 Flash Ensemble)
 ----------------------------------------------------------------
 - 物理モデル + Gemini 2.5 Flash を組み合わせたハイブリッド火災拡大シミュレーション
 - Gemini を複数視点で並列実行し、重み付きアンサンブルで総合判断
-- 地図上クリック / 住所検索 / 緯度経度で発生源を指定
-- 指定地点の気象情報(OpenWeather)を取得し、より詳細な解析に反映
-- 延焼楕円を地図上に時間スライダーで“アニメーション風”に表示
-- UI は世界標準的なダッシュボード構成
+- 発生源の指定: 地図クリック / 住所検索 / 緯度・経度入力
+- OpenWeather の気象情報を取得して解析に反映
+- 発生源からの延焼を、地図上で時間スライダーによる“アニメーション風”表示
+- 初めてでも使いやすいレイアウトに整理
 
 ■ 必要ライブラリ
 - streamlit
@@ -43,6 +43,7 @@ import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
 import matplotlib
+from matplotlib import font_manager as fm
 import requests
 import urllib.parse
 import folium
@@ -63,20 +64,56 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ---- 日本語フォント設定（グラフ文字化け対策） ----
-try:
-    matplotlib.rcParams["font.family"] = "IPAexGothic"  # 環境にあれば使われる
-except Exception:
-    pass
-matplotlib.rcParams["axes.unicode_minus"] = False
+# ---- 日本語フォント設定 & グラフテーマ（□対策＋見た目調整） ----
+def configure_matplotlib_for_japanese() -> None:
+    """
+    利用可能な日本語フォントを自動検出して設定。
+    見つからない場合は sans-serif のまま。
+    """
+    try:
+        available = {f.name for f in fm.fontManager.ttflist}
+        candidates = [
+            "IPAexGothic",
+            "IPAPGothic",
+            "Noto Sans CJK JP",
+            "Noto Sans JP",
+            "Yu Gothic",
+            "YuGothic",
+            "MS Gothic",
+            "MS UI Gothic",
+        ]
+        for name in candidates:
+            if name in available:
+                matplotlib.rcParams["font.family"] = name
+                break
+        else:
+            # 見つからない場合はデフォルト
+            matplotlib.rcParams["font.family"] = "sans-serif"
+    except Exception:
+        matplotlib.rcParams["font.family"] = "sans-serif"
 
-# ---- 軽いCSSで可読性向上 ----
+    matplotlib.rcParams["axes.unicode_minus"] = False
+
+    # グラフの見た目をアプリに合わせて少しグレー基調にする
+    # （Streamlit のライトテーマに近い色）
+    base_bg = "#f0f2f6"
+    matplotlib.rcParams["figure.facecolor"] = base_bg
+    matplotlib.rcParams["axes.facecolor"] = "#ffffff"
+    matplotlib.rcParams["axes.edgecolor"] = "#cccccc"
+    matplotlib.rcParams["grid.color"] = "#dddddd"
+    matplotlib.rcParams["grid.alpha"] = 0.6
+    matplotlib.rcParams["axes.grid"] = True
+    matplotlib.rcParams["axes.titlesize"] = 12
+    matplotlib.rcParams["axes.labelsize"] = 11
+
+configure_matplotlib_for_japanese()
+
+# ---- 軽いCSSで全体を少し整える ----
 CUSTOM_CSS = """
 .block-container {padding-top: 1.2rem; padding-bottom: 2rem;}
 div[data-testid="stMetric"] > div {white-space: nowrap;}
 h3, h4 { margin-top: 0.6rem; }
 .small { font-size: 0.92rem; opacity: 0.8; }
-button[kind="secondary"] { min-width: 200px; }
 """
 st.markdown(f"<style>{CUSTOM_CSS}</style>", unsafe_allow_html=True)
 
@@ -118,7 +155,6 @@ LB_C = 0.30
 LB_MAX = 5.0
 EPS = 1e-9
 
-# ------------------------------ 汎用関数 ------------------------------
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
@@ -477,7 +513,7 @@ def meters_to_latlon(lat0: float, lon0: float, dx_m: float, dy_m: float) -> Tupl
     原点(lat0, lon0) からのオフセット dx,dy[m] を緯度経度に変換
     dx: 東向き[m], dy: 北向き[m]
     """
-    R = 6378137.0  # WGS84
+    R = 6378137.0
     dlat = (dy_m / R) * (180.0 / math.pi)
     dlon = (dx_m / (R * math.cos(math.radians(lat0)))) * (180.0 / math.pi)
     return lat0 + dlat, lon0 + dlon
@@ -491,18 +527,17 @@ def ellipse_polygon_latlon(
     n_points: int = 120,
 ) -> List[Tuple[float, float]]:
     """
-    物理モデルの楕円 (a,b, 風向) を地理座標のポリゴン(緯度経度列)に変換
-    - X軸: 東, Y軸: 北
-    - 風向: 0°=北, 90°=東（入力と同じルール）
+    物理モデルの楕円 (a,b, 風向) を地理座標のポリゴン(緯度経度列)に変換。
+    小規模エリアと仮定して平面近似。
     """
     t = np.linspace(0, 2 * np.pi, n_points)
     x = a_m * np.cos(t)
     y = b_m * np.sin(t)
 
-    theta = math.radians(90.0 - wind_dir_deg)  # 北を+Y, 東を+X として回転
+    theta = math.radians(90.0 - wind_dir_deg)
     rot = np.array([[math.cos(theta), -math.sin(theta)],
                     [math.sin(theta),  math.cos(theta)]])
-    xy = rot @ np.vstack([x, y])  # shape (2, n)
+    xy = rot @ np.vstack([x, y])
 
     poly = []
     for dx, dy in zip(xy[0], xy[1]):
@@ -538,7 +573,7 @@ st.title("Fire Spread Simulator Pro")
 st.caption("Save Your Self / 火災拡大シミュレーション（Gemini 2.5 Flash Ensemble）")
 
 with st.sidebar:
-    st.header("入力パラメータ")
+    st.header("基本条件")
 
     fuel_class = st.selectbox(
         "燃料種",
@@ -565,8 +600,8 @@ with st.sidebar:
         rel_humidity = st.slider("相対湿度[%]", 5, 100, 40, 1)
         air_temp_c = st.slider("気温[°C]", -10, 50, 25, 1)
 
-    st.divider()
-    st.subheader("消火設定")
+    st.markdown("---")
+    st.header("消火設定")
     c3, c4, c5 = st.columns(3)
     with c3:
         default_app_rate = {"grass": 4.0, "shrub": 8.0, "timber": 12.0}[fuel_class]
@@ -612,7 +647,7 @@ with st.sidebar:
     )
 
 # ------------------------------ 発生源 & 気象 ------------------------------
-st.subheader("発生源の指定と外部データ連携")
+st.subheader("1. 発生源の指定と気象データ")
 
 left_loc, right_loc = st.columns([1.3, 1])
 
@@ -650,7 +685,7 @@ with left_loc:
             else:
                 st.warning("住所を入力してください。")
 
-    else:  # 地図上で指定（HAS_FOLIUM が True の場合のみここに来る）
+    else:  # 地図上で指定
         st.caption("地図をクリックすると、その地点を発生源として設定できます。")
         m = folium.Map(
             location=[cur_lat, cur_lon],
@@ -663,7 +698,7 @@ with left_loc:
             icon=folium.Icon(color="red", icon="fire"),
         ).add_to(m)
         m.add_child(folium.LatLngPopup())
-        out = st_folium(m, width=700, height=420, returned_objects=[])
+        out = st_folium(m, width=650, height=380, returned_objects=[])
         if out and out.get("last_clicked") is not None:
             lat = out["last_clicked"]["lat"]
             lon = out["last_clicked"]["lng"]
@@ -709,13 +744,15 @@ origin_tuple: Optional[Tuple[float, float]] = (
 )
 weather_ctx: Optional[Dict[str, float]] = st.session_state["weather_info"]
 
-st.divider()
+st.markdown("---")
 
-# ------------------------------ 主要出力エリア ------------------------------
+# ------------------------------ 2. 解析実行と結果 ------------------------------
+st.subheader("2. 解析結果（Gemini アンサンブル + 物理モデル）")
+
 outputs, ensemble_meta = run_gemini_ensemble(inputs, origin_tuple, weather_ctx)
 
 m1, m2, m3, m4 = st.columns(4)
-metric_block(m1, "等価半径 (Gemini ensemble)", outputs.radius_m, "m")
+metric_block(m1, "等価半径", outputs.radius_m, "m")
 metric_block(m2, "延焼面積", outputs.area_sqm, "m²")
 metric_block(m3, "必要水量(推定)", outputs.water_volume_tons, "ton")
 metric_block(m4, "周長(楕円)", outputs.perimeter_m, "m")
@@ -725,40 +762,43 @@ if ensemble_meta["mode"] == "gemini_ensemble":
 else:
     st.warning("Gemini が無効なため、物理モデルのみで計算しています。", icon="⚠️")
 
-st.info(
-    "本モデルは現場安全判断の補助を目的とした簡易推定です。"
-    " 実地の燃料状態・気象・地形・活動状況により大きく変動します。",
-    icon="ℹ️",
+st.caption(
+    "※本モデルは現場判断の補助を目的とした簡易推定です。"
+    " 実際の地形・燃料・気象・活動状況によって結果は大きく変わります。"
 )
 
-# ------------------------------ タブ: 図/JSON/アニメ/感度/ヘルプ ------------------------------
-tab_fig, tab_json, tab_anim, tab_sensitivity, tab_help = st.tabs(
-    ["📈 可視化", "🧾 JSON/エクスポート", "🌏 延焼アニメーション", "🧪 感度分析", "❓ ヘルプ"]
+# ------------------------------ タブ: グラフ / アニメ / データ / 感度 / 詳細 ------------------------------
+tab_main, tab_anim, tab_data, tab_sens, tab_detail = st.tabs(
+    ["📊 グラフ", "🌏 延焼アニメーション", "📁 データ出力", "🧪 感度分析", "🔍 詳細・ヘルプ"]
 )
 
 physical_for_plots = run_physical_model(inputs)
 
-with tab_fig:
-    st.subheader("延焼楕円の可視化（物理モデル形状）")
-    fig1, ax1 = plt.subplots(figsize=(6, 6))
+# ---- メイングラフ ----
+with tab_main:
+    st.markdown("#### 延焼形状（物理モデル）")
+
+    fig1, ax1 = plt.subplots(figsize=(5.5, 5.5))
     a = physical_for_plots.ellipse_a_m
     b = physical_for_plots.ellipse_b_m
     t = np.linspace(0, 2 * np.pi, 400)
     x = a * np.cos(t)
     y = b * np.sin(t)
     theta = math.radians(90 - inputs.wind_dir_deg)
-    rot = np.array([[math.cos(theta), -math.sin(theta)], [math.sin(theta), math.cos(theta)]])
+    rot = np.array([[math.cos(theta), -math.sin(theta)],
+                    [math.sin(theta),  math.cos(theta)]])
     xy = rot @ np.vstack([x, y])
     ax1.plot(xy[0], xy[1], linewidth=2)
     ax1.scatter([0], [0], marker="*", s=120)
     ax1.set_aspect("equal", "box")
     ax1.set_xlabel("X [m]")
     ax1.set_ylabel("Y [m]")
-    ax1.grid(True, alpha=0.4)
+    ax1.set_title("延焼楕円（上から見た図）")
     st.pyplot(fig1)
 
-    st.subheader("時間に対する半径/水量の推移（物理モデルベース）")
-    fig2, ax2 = plt.subplots(figsize=(7, 4))
+    st.markdown("#### 時間とともに変化する半径・水量（物理モデル）")
+
+    fig2, ax2 = plt.subplots(figsize=(6.5, 4))
     times = np.linspace(max(1.0, inputs.duration_min / 20), inputs.duration_min, 40)
     radii = []
     waters = []
@@ -780,51 +820,22 @@ with tab_fig:
         )
         radii.append(o.radius_m)
         waters.append(o.water_volume_tons)
-    ax2.plot(times, radii, label="半径[m]")
+    ax2.plot(times, radii, linewidth=2)
     ax2.set_xlabel("時間[min]")
     ax2.set_ylabel("半径[m]")
-    ax2.grid(True, alpha=0.4)
+    ax2.set_title("時間と半径の関係")
     st.pyplot(fig2)
 
-    fig3, ax3 = plt.subplots(figsize=(7, 4))
-    ax3.plot(times, waters, label="水量[ton]")
+    fig3, ax3 = plt.subplots(figsize=(6.5, 4))
+    ax3.plot(times, waters, linewidth=2)
     ax3.set_xlabel("時間[min]")
     ax3.set_ylabel("必要水量[ton]")
-    ax3.grid(True, alpha=0.4)
+    ax3.set_title("時間と必要水量の関係")
     st.pyplot(fig3)
 
-with tab_json:
-    st.subheader("JSON 出力（Gemini ensemble）")
-    json_str = to_json(outputs)
-    st.code(json_str, language="json")
-    st.download_button(
-        "JSONをダウンロード",
-        data=json_str.encode("utf-8"),
-        file_name="fire_spread_output.json",
-        mime="application/json",
-    )
-
-    st.divider()
-    st.subheader("CSV 出力 (主要値)")
-    csv_lines = [
-        "metric,value,unit",
-        f"radius_m,{outputs.radius_m:.2f},m",
-        f"area_sqm,{outputs.area_sqm:.2f},m2",
-        f"water_volume_tons,{outputs.water_volume_tons:.2f},ton",
-        f"ellipse_a_m,{outputs.ellipse_a_m:.2f},m",
-        f"ellipse_b_m,{outputs.ellipse_b_m:.2f},m",
-        f"perimeter_m,{outputs.perimeter_m:.2f},m",
-    ]
-    csv_data = "\n".join(csv_lines)
-    st.download_button(
-        "CSVをダウンロード",
-        data=csv_data.encode("utf-8"),
-        file_name="fire_spread_output.csv",
-        mime="text/csv",
-    )
-
+# ---- 延焼アニメーション（地図） ----
 with tab_anim:
-    st.subheader("延焼アニメーション（地図上で時間経過を確認）")
+    st.markdown("#### 地図上で見る延焼の広がり")
 
     if not HAS_FOLIUM:
         st.warning(
@@ -833,7 +844,6 @@ with tab_anim:
             icon="ℹ️",
         )
     else:
-        # 時間スライダーで楕円を更新（疑似アニメーション）
         max_t = max(5.0, float(inputs.duration_min))
         step_t = max(1.0, max_t / 20.0)
         t_sel = st.slider(
@@ -844,7 +854,6 @@ with tab_anim:
             step=step_t,
         )
 
-        # t=0 のときは初期半径のみ
         if t_sel <= 0.0:
             tmp_inputs = Inputs(
                 duration_min=0.0,
@@ -896,15 +905,11 @@ with tab_anim:
             zoom_start=12,
             tiles="OpenStreetMap",
         )
-
-        # 発生源マーカー
         folium.Marker(
             location=[lat0, lon0],
             popup="発生源",
             icon=folium.Icon(color="red", icon="fire"),
         ).add_to(m_anim)
-
-        # 延焼楕円ポリゴン
         folium.Polygon(
             locations=poly_latlon,
             color="orange",
@@ -913,11 +918,42 @@ with tab_anim:
             popup=f"{t_sel:.1f} 分後の推定延焼範囲",
         ).add_to(m_anim)
 
-        st_folium(m_anim, width=800, height=500, returned_objects=[])
+        st_folium(m_anim, width=800, height=480, returned_objects=[])
 
-with tab_sensitivity:
-    st.subheader("感度分析 (シナリオ比較 / 物理モデル)")
-    st.caption("任意の軸を変更して、半径・水量の変化を高速に比較")
+# ---- データ出力 ----
+with tab_data:
+    st.markdown("#### JSON 出力（Gemini アンサンブル結果）")
+    json_str = to_json(outputs)
+    st.code(json_str, language="json")
+    st.download_button(
+        "JSON をダウンロード",
+        data=json_str.encode("utf-8"),
+        file_name="fire_spread_output.json",
+        mime="application/json",
+    )
+
+    st.markdown("#### CSV 出力（主要指標）")
+    csv_lines = [
+        "metric,value,unit",
+        f"radius_m,{outputs.radius_m:.2f},m",
+        f"area_sqm,{outputs.area_sqm:.2f},m2",
+        f"water_volume_tons,{outputs.water_volume_tons:.2f},ton",
+        f"ellipse_a_m,{outputs.ellipse_a_m:.2f},m",
+        f"ellipse_b_m,{outputs.ellipse_b_m:.2f},m",
+        f"perimeter_m,{outputs.perimeter_m:.2f},m",
+    ]
+    csv_data = "\n".join(csv_lines)
+    st.download_button(
+        "CSV をダウンロード",
+        data=csv_data.encode("utf-8"),
+        file_name="fire_spread_output.csv",
+        mime="text/csv",
+    )
+
+# ---- 感度分析（物理モデル） ----
+with tab_sens:
+    st.markdown("#### 感度分析（物理モデルのみ）")
+    st.caption("風速・湿度・勾配・燃料種を変えたときの半径と必要水量の変化をざっくり比較できます。")
 
     axis = st.selectbox("変更パラメータ", ["風速", "湿度", "斜面勾配", "燃料種"], index=0)
 
@@ -944,10 +980,10 @@ with tab_sensitivity:
             label = f"燃料 {f}"
             scenarios.append((label, Inputs(**{**inputs.__dict__, "fuel_class": f})))
 
-    figS, axS = plt.subplots(figsize=(7, 4))
+    figS, axS = plt.subplots(figsize=(6.5, 4))
     for label, sc_inp in scenarios:
         o = run_physical_model(sc_inp)
-        axS.scatter(o.radius_m, o.water_volume_tons, s=60, label=label)
+        axS.scatter(o.radius_m, o.water_volume_tons, s=60)
         axS.annotate(
             label,
             (o.radius_m, o.water_volume_tons),
@@ -956,41 +992,36 @@ with tab_sensitivity:
         )
     axS.set_xlabel("等価半径[m]")
     axS.set_ylabel("必要水量[ton]")
-    axS.grid(True, alpha=0.4)
+    axS.set_title("パラメータ変更時の半径と必要水量")
     st.pyplot(figS)
 
-with tab_help:
-    st.subheader("モデルの考え方")
+# ---- 詳細情報・ヘルプ ----
+with tab_detail:
+    st.markdown("#### モデルの考え方（概要）")
     st.markdown(
         """
-- **物理モデルコア**
+- **物理モデル**
   - 延焼速度(ROS) = 基準ROS(燃料別) × 湿度係数 × 風係数 × 斜面係数
-  - 風下方向に長い楕円として延焼形状を近似
+  - 風下方向に長い楕円として延焼範囲を近似
   - 等価半径 = 楕円面積と同じ円の半径
   - 必要水量 = 周長×散水比率×散水時間 / 散水効率
 
 - **Gemini 2.5 Flash アンサンブル**
   - 物理モデル結果をベースラインとして提示
   - 「安全マージン重視」「資機材効率重視」「バランス型」の3ロールで並列推定
-  - 各ロールは ±30% の範囲で補正された数値を JSON で返す
-  - 3つの結果を重み付き平均して、最終的な推奨値を決定
-  - 発生源位置と OpenWeather の気象情報を解析コンテキストに含める
+  - 各ロールは ±30% の範囲で補正された数値を JSON で返し、重み付き平均で最終値を決定
+  - 発生源位置と OpenWeather の気象情報を解析コンテキストに含めます
 
 - **延焼アニメーション**
   - 発生源を中心とした楕円形の延焼範囲を、時間スライダーに応じて地図上に描画
   - 小規模エリアとみなし、平面近似で[m]→緯度経度に変換
-  - 実際の地形・風場とは異なる可能性があるため、現場判断の補助程度に利用してください。
-
-- **高速性の確保**
-  - Gemini 呼び出しは主要出力の1回のみ（3ロールを並列実行）
-  - グラフや感度分析、アニメーションの楕円計算は物理モデルで行い、高速に応答
         """
     )
 
-    st.subheader("Gemini アンサンブル詳細（デバッグ・検証用）")
-    with st.expander("内部ロールの生データを見る"):
+    st.markdown("#### Gemini アンサンブルの内部データ（必要な場合のみ）")
+    with st.expander("詳細を見る（上級者向け）"):
         st.json(ensemble_meta)
 
-# ------------------------------ 機械連携用JSON ------------------------------
-with st.expander("機械連携用JSON (コピー用 / Gemini ensemble)"):
+# ---- 機械連携用 JSON（コピー用） ----
+with st.expander("機械連携用 JSON (Gemini アンサンブル結果)"):
     st.code(to_json(outputs), language="json")
