@@ -87,15 +87,13 @@ def configure_matplotlib_for_japanese() -> None:
                 matplotlib.rcParams["font.family"] = name
                 break
         else:
-            # 見つからない場合はデフォルト
             matplotlib.rcParams["font.family"] = "sans-serif"
     except Exception:
         matplotlib.rcParams["font.family"] = "sans-serif"
 
     matplotlib.rcParams["axes.unicode_minus"] = False
 
-    # グラフの見た目をアプリに合わせて少しグレー基調にする
-    # （Streamlit のライトテーマに近い色）
+    # グラフの見た目（Streamlit ライトテーマ寄り）
     base_bg = "#f0f2f6"
     matplotlib.rcParams["figure.facecolor"] = base_bg
     matplotlib.rcParams["axes.facecolor"] = "#ffffff"
@@ -185,12 +183,15 @@ def ros_m_per_min(inp: Inputs) -> float:
     return max(EPS, r0 * f_h * f_w * f_s)
 
 def length_breadth_ratio(u_ms: float) -> float:
+    """
+    風速に応じた長軸/短軸比。風が強いほど前後に細長くなる。
+    """
     return clamp(1.0 + LB_C * u_ms, 1.0, LB_MAX)
 
 def ellipse_axes(ros: float, t_min: float, init_r: float, u_ms: float) -> Tuple[float, float]:
-    A = ros * t_min + init_r
+    A = ros * t_min + init_r   # 半長軸（m）
     lb = length_breadth_ratio(u_ms)
-    B = max(EPS, A / lb)
+    B = max(EPS, A / lb)       # 半短軸（m）
     return A, B
 
 def ellipse_area_perimeter(a: float, b: float) -> Tuple[float, float]:
@@ -524,24 +525,37 @@ def ellipse_polygon_latlon(
     a_m: float,
     b_m: float,
     wind_dir_deg: float,
+    center_shift_factor: float,
     n_points: int = 120,
 ) -> List[Tuple[float, float]]:
     """
     物理モデルの楕円 (a,b, 風向) を地理座標のポリゴン(緯度経度列)に変換。
-    小規模エリアと仮定して平面近似。
+    - X軸: 東, Y軸: 北
+    - 風向: 0°=北, 90°=東
+    - center_shift_factor に応じて、楕円の“中心”を風下側へシフトさせる。
+      → 発生源（lat0,lon0）は楕円のやや後端に来るので、現実の火頭が風下側に伸びた形に近づく。
     """
+    # 基本楕円（原点中心）
     t = np.linspace(0, 2 * np.pi, n_points)
     x = a_m * np.cos(t)
     y = b_m * np.sin(t)
 
+    # 風向に応じて回転（0°=北, 90°=東）
     theta = math.radians(90.0 - wind_dir_deg)
     rot = np.array([[math.cos(theta), -math.sin(theta)],
                     [math.sin(theta),  math.cos(theta)]])
     xy = rot @ np.vstack([x, y])
 
+    # 風下方向（長軸正方向）に楕円中心をシフト
+    # center_shift_factor=0 → 発生源が中心
+    # center_shift_factor>0 → 発生源がやや後端寄り / 風下側に大きく伸びる
+    shift_dist = center_shift_factor * a_m
+    shift_x = shift_dist * math.cos(theta)
+    shift_y = shift_dist * math.sin(theta)
+
     poly = []
     for dx, dy in zip(xy[0], xy[1]):
-        lat, lon = meters_to_latlon(lat0, lon0, dx, dy)
+        lat, lon = meters_to_latlon(lat0, lon0, dx + shift_x, dy + shift_y)
         poly.append((lat, lon))
     return poly
 
@@ -892,11 +906,19 @@ with tab_anim:
         )
 
         lat0, lon0 = origin_tuple
+
+        # 風速に応じた長軸比を使って、楕円の中心シフト量を決定
+        lb = length_breadth_ratio(inputs.wind_speed_ms)
+        # lb=1（無風）→ shift≈0, lbが大きいほど風下側へシフト（最大0.4a程度）
+        center_shift_factor = 0.5 * (1.0 - 1.0 / lb)  # 0〜0.4程度
+
         poly_latlon = ellipse_polygon_latlon(
-            lat0, lon0,
+            lat0,
+            lon0,
             o_t.ellipse_a_m,
             o_t.ellipse_b_m,
             inputs.wind_dir_deg,
+            center_shift_factor=center_shift_factor,
             n_points=180,
         )
 
@@ -1012,9 +1034,12 @@ with tab_detail:
   - 各ロールは ±30% の範囲で補正された数値を JSON で返し、重み付き平均で最終値を決定
   - 発生源位置と OpenWeather の気象情報を解析コンテキストに含めます
 
-- **延焼アニメーション**
-  - 発生源を中心とした楕円形の延焼範囲を、時間スライダーに応じて地図上に描画
-  - 小規模エリアとみなし、平面近似で[m]→緯度経度に変換
+- **延焼アニメーション（改良点）**
+  - 楕円の長軸方向を風向（風下方向）に合わせるだけでなく、
+    風速に応じた長軸/短軸比から「中心の風下方向へのシフト量」を計算。
+  - 無風時はほぼ円形で発生源が中心、
+    風が強くなるほど発生源は楕円の後端寄りになり、風下側に大きく伸びた形になります。
+  - 小規模エリアとみなし、平面近似で[m]→緯度経度に変換。
         """
     )
 
@@ -1022,6 +1047,6 @@ with tab_detail:
     with st.expander("詳細を見る（上級者向け）"):
         st.json(ensemble_meta)
 
-# ---- 機械連携用 JSON（コピー用） ----
+# ---- 機械連携用 JSON（コピー用）----
 with st.expander("機械連携用 JSON (Gemini アンサンブル結果)"):
     st.code(to_json(outputs), language="json")
