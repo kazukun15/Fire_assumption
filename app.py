@@ -4,20 +4,31 @@ Fire Spread Simulator Pro (Streamlit + Gemini 2.5 Flash Ensemble)
 ----------------------------------------------------------------
 - 物理モデル + Gemini 2.5 Flash を組み合わせたハイブリッド火災拡大シミュレーション
 - Gemini を複数視点で並列実行し、重み付きアンサンブルで総合判断
-- UI は世界標準的なダッシュボード構成（メトリクス / グラフ / エクスポート / 感度分析）
+- 地図上クリック または 住所検索で発生源を指定
+- 指定地点の気象情報(OpenWeather)を取得し、より詳細な解析に反映
+- UI は世界標準的なダッシュボード構成
 
 ■ 必要ライブラリ
 - streamlit
 - numpy
 - matplotlib
-- google-generativeai  (pip install google-generativeai)
+- google-generativeai
+- requests
+- folium
+- streamlit-folium
 
 ■ 起動
 streamlit run app.py
 
-■ .streamlit/secrets.toml に以下のような構造で API を定義しておくこと：
+■ .streamlit/secrets.toml 例
 [general]
-api_key = "（ここにGoogle API Key）"
+api_key = "YOUR_GOOGLE_API_KEY"               # Gemini 用（Google API Key）
+
+[mapbox]
+access_token = "YOUR_MAPBOX_ACCESS_TOKEN"     # ジオコーディング用
+
+[openweather]
+api_key = "YOUR_OPENWEATHER_API_KEY"         # 気象情報取得用
 """
 
 from __future__ import annotations
@@ -30,6 +41,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
+import matplotlib
+import requests
+import urllib.parse
+import folium
+from streamlit_folium import st_folium
 import google.generativeai as genai
 
 # ------------------------- ページ設定 / グローバル -------------------------
@@ -40,7 +56,17 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ---- 最小限のCSSで可読性向上（ダーク/ライト両対応） ----
+# ---- 日本語フォント設定（グラフ文字化け対策） ----
+# IPAexGothic 等が環境に入っていれば日本語が綺麗に表示されます。
+# 未インストールの場合は matplotlib のデフォルトにフォールバックします。
+try:
+    matplotlib.rcParams["font.family"] = "IPAexGothic"
+except Exception:
+    # 失敗時はデフォルトフォントのまま
+    pass
+matplotlib.rcParams["axes.unicode_minus"] = False
+
+# ---- 軽いCSSで可読性向上（ダーク/ライト両対応） ----
 CUSTOM_CSS = """
 /* タイトルの余白最適化 */
 .block-container {padding-top: 1.2rem; padding-bottom: 2rem;}
@@ -51,7 +77,7 @@ h3, h4 { margin-top: 0.6rem; }
 /* 小さなヘルプテキスト */
 .small { font-size: 0.92rem; opacity: 0.8; }
 /* ダウンロードボタンの幅 */
-button[kind="secondary"] { min_width: 200px; }
+button[kind="secondary"] { min-width: 200px; }
 """
 st.markdown(f"<style>{CUSTOM_CSS}</style>", unsafe_allow_html=True)
 
@@ -173,6 +199,71 @@ def run_physical_model(inp: Inputs) -> Outputs:
         perimeter_m=perimeter,
     )
 
+# ------------------------------ 外部API: ジオコーディング & 気象 ------------------------------
+def geocode_address_mapbox(address: str) -> Optional[Tuple[float, float]]:
+    """住所文字列から緯度経度を取得（MapboxのForward Geocoding APIを利用）"""
+    try:
+        token = st.secrets["mapbox"]["access_token"]
+    except Exception:
+        st.error("Mapbox の access_token が secrets.toml に設定されていません。")
+        return None
+
+    try:
+        q = urllib.parse.quote(address)
+        url = f"https://api.mapbox.com/geocoding/v5/mapbox.places/{q}.json"
+        params = {
+            "access_token": token,
+            "limit": 1,
+            "language": "ja",
+        }
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        features = data.get("features", [])
+        if not features:
+            st.warning("住所から位置を特定できませんでした。")
+            return None
+        coords = features[0]["center"]  # [lon, lat]
+        lon, lat = coords[0], coords[1]
+        return lat, lon
+    except Exception as e:
+        st.error(f"ジオコーディング中にエラーが発生しました: {e}")
+        return None
+
+def fetch_openweather(lat: float, lon: float) -> Optional[Dict[str, float]]:
+    """指定座標の現在気象情報を OpenWeather から取得（気温・湿度・風速）"""
+    try:
+        api_key = st.secrets["openweather"]["api_key"]
+    except Exception:
+        st.error("OpenWeather の api_key が secrets.toml に設定されていません。")
+        return None
+
+    try:
+        url = "https://api.openweathermap.org/data/2.5/weather"
+        params = {
+            "lat": lat,
+            "lon": lon,
+            "appid": api_key,
+            "units": "metric",
+            "lang": "ja",
+        }
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        main = data.get("main", {})
+        wind = data.get("wind", {})
+        weather = {
+            "temp_c": float(main.get("temp", 0.0)),
+            "humidity": float(main.get("humidity", 0.0)),
+            "wind_speed": float(wind.get("speed", 0.0)),
+            "wind_deg": float(wind.get("deg", 0.0)) if "deg" in wind else None,
+            "description": data.get("weather", [{}])[0].get("description", ""),
+        }
+        return weather
+    except Exception as e:
+        st.error(f"気象情報取得中にエラーが発生しました: {e}")
+        return None
+
 # ------------------------------ Gemini 2.5 Flash 設定 ------------------------------
 def get_gemini_model() -> Optional[genai.GenerativeModel]:
     """
@@ -181,39 +272,64 @@ def get_gemini_model() -> Optional[genai.GenerativeModel]:
     api_key = "YOUR_GOOGLE_API_KEY"
     """
     try:
-        # ユーザーの secrets.toml 構造に合わせる
         api_key = st.secrets["general"]["api_key"]
-
         if not api_key:
             st.warning("general.api_key が設定されていないため、Gemini 解析は無効です。", icon="⚠️")
             return None
-
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel("gemini-2.5-flash")
         return model
-
     except Exception as e:
         st.error(f"Gemini モデル初期化でエラーが発生しました: {e}")
         return None
 
-def build_gemini_prompt(inputs: Inputs, physical: Outputs, role_desc: str) -> str:
+def build_gemini_prompt(
+    inputs: Inputs,
+    physical: Outputs,
+    role_desc: str,
+    origin: Optional[Tuple[float, float]],
+    weather: Optional[Dict[str, float]],
+) -> str:
     """
     各ロール（安全重視・資機材重視・バランス）のためのプロンプト。
-    物理モデル結果をベースに ±30% の補正範囲で出力させる。
+    物理モデル結果 + 発生源位置 + 気象情報を統合して解析。
     """
+    if origin is not None:
+        lat, lon = origin
+        origin_str = f"緯度 {lat:.5f}, 経度 {lon:.5f}"
+    else:
+        origin_str = "発生源位置: 未指定"
+
+    if weather is not None:
+        wstr = (
+            f"気温 {weather['temp_c']:.1f} ℃, "
+            f"相対湿度 {weather['humidity']:.0f} %, "
+            f"風速 {weather['wind_speed']:.1f} m/s, "
+            f"風向(deg) {weather.get('wind_deg', 'N/A')}, "
+            f"天気: {weather.get('description', '')}"
+        )
+    else:
+        wstr = "外部気象データ: 未取得（入力された値のみで評価）"
+
     return f"""
 あなたは火災拡大シミュレーションの専門家です。
 あなたの視点: {role_desc}
 
 以下の条件で、火災の拡大と必要水量を評価してください。
 
-[入力条件]
+[発生源位置]
+- {origin_str}
+
+[外部気象情報(OpenWeather)]
+- {wstr}
+
+[入力条件（ユーザー入力）]
 - 燃料種: {inputs.fuel_class}
 - 予測時間: {inputs.duration_min:.1f} 分
-- 風速: {inputs.wind_speed_ms:.1f} m/s
-- 風向: {inputs.wind_dir_deg:.0f} 度 (0=北, 90=東)
-- 相対湿度: {inputs.rel_humidity:.0f} %
-- 気温: {inputs.air_temp_c:.1f} ℃
+- 風速(入力値): {inputs.wind_speed_ms:.1f} m/s
+- 風向(入力値): {inputs.wind_dir_deg:.0f} 度 (0=北, 90=東)
+- 相対湿度(入力値): {inputs.rel_humidity:.0f} %
+- 気温(入力値): {inputs.air_temp_c:.1f} ℃
 - 斜面勾配: {inputs.slope_percent:.1f} %
 - 初期半径: {inputs.init_radius_m:.1f} m
 - 散水比率: {inputs.app_rate_lpm_per_m:.2f} L/min/m
@@ -272,9 +388,11 @@ def call_gemini_variant(
     role_id: str,
     role_desc: str,
     temperature: float,
+    origin: Optional[Tuple[float, float]],
+    weather: Optional[Dict[str, float]],
 ) -> Dict:
     """各ロールの Gemini 呼び出し。失敗時は物理モデルをそのまま返す。"""
-    prompt = build_gemini_prompt(inputs, physical, role_desc)
+    prompt = build_gemini_prompt(inputs, physical, role_desc, origin, weather)
     try:
         response = model.generate_content(
             prompt,
@@ -316,12 +434,17 @@ def call_gemini_variant(
             },
         }
 
-def run_gemini_ensemble(inputs: Inputs) -> Tuple[Outputs, Dict]:
+def run_gemini_ensemble(
+    inputs: Inputs,
+    origin: Optional[Tuple[float, float]],
+    weather: Optional[Dict[str, float]],
+) -> Tuple[Outputs, Dict]:
     """
     物理モデル + Gemini アンサンブルによる総合出力。
     - 物理モデル: ベースライン
     - Gemini: 安全重視 / 資機材効率重視 / バランス型 の3ロール
     - 並列実行 + 重み付き平均で最終値を決定
+    - 発生源位置 & 気象情報を解析コンテキストに含める
     """
     physical = run_physical_model(inputs)
     model = get_gemini_model()
@@ -354,6 +477,8 @@ def run_gemini_ensemble(inputs: Inputs) -> Tuple[Outputs, Dict]:
                     role_id,
                     desc,
                     temp,
+                    origin,
+                    weather,
                 )
             )
         for fut in as_completed(futures):
@@ -384,6 +509,8 @@ def run_gemini_ensemble(inputs: Inputs) -> Tuple[Outputs, Dict]:
         "mode": "gemini_ensemble",
         "physical": physical.__dict__,
         "ensemble_details": results,
+        "origin": origin,
+        "weather": weather,
     }
     return agg, meta
 
@@ -401,6 +528,15 @@ def to_json(outputs: Outputs) -> str:
         "perimeter_m": round(outputs.perimeter_m, 2),
     }
     return json.dumps(payload, ensure_ascii=False)
+
+# ------------------------------ セッション初期化（発生源位置・気象） ------------------------------
+if "origin_lat" not in st.session_state:
+    # デフォルトは東京付近
+    st.session_state["origin_lat"] = 35.681236
+if "origin_lon" not in st.session_state:
+    st.session_state["origin_lon"] = 139.767125
+if "weather_info" not in st.session_state:
+    st.session_state["weather_info"] = None
 
 # ------------------------------ メインUI ------------------------------
 st.title("Fire Spread Simulator Pro")
@@ -481,8 +617,100 @@ with st.sidebar:
         efficiency=float(efficiency),
     )
 
+# ------------------------------ 発生源位置と気象情報 UI ------------------------------
+st.subheader("発生源の指定と外部データ連携")
+
+left_loc, right_loc = st.columns([1.3, 1])
+
+with left_loc:
+    method = st.radio(
+        "発生源の指定方法",
+        ["地図上で指定", "住所から検索", "緯度経度を直接入力"],
+        index=0,
+        horizontal=True,
+    )
+
+    # 現在の値
+    cur_lat = st.session_state["origin_lat"]
+    cur_lon = st.session_state["origin_lon"]
+
+    if method == "緯度経度を直接入力":
+        lat = st.number_input("緯度", -90.0, 90.0, float(cur_lat), step=0.0001, format="%.5f")
+        lon = st.number_input("経度", -180.0, 180.0, float(cur_lon), step=0.0001, format="%.5f")
+        st.session_state["origin_lat"] = lat
+        st.session_state["origin_lon"] = lon
+
+    elif method == "住所から検索":
+        addr = st.text_input("住所（例：愛媛県松山市...）", "")
+        if st.button("住所から発生源を検索"):
+            if addr.strip():
+                result = geocode_address_mapbox(addr.strip())
+                if result is not None:
+                    lat, lon = result
+                    st.session_state["origin_lat"] = lat
+                    st.session_state["origin_lon"] = lon
+                    st.success(f"発生源を設定しました：緯度 {lat:.5f}, 経度 {lon:.5f}")
+            else:
+                st.warning("住所を入力してください。")
+
+    else:  # 地図上で指定
+        st.caption("地図をクリックすると、その地点を発生源として設定できます。")
+        m = folium.Map(
+            location=[cur_lat, cur_lon],
+            zoom_start=10,
+            tiles="OpenStreetMap",
+        )
+        # 現在の発生源をマーカー表示
+        folium.Marker(
+            location=[cur_lat, cur_lon],
+            popup="現在の発生源",
+            icon=folium.Icon(color="red", icon="fire"),
+        ).add_to(m)
+        m.add_child(folium.LatLngPopup())
+        out = st_folium(m, width=700, height=420, returned_objects=[])
+        if out and out.get("last_clicked") is not None:
+            lat = out["last_clicked"]["lat"]
+            lon = out["last_clicked"]["lng"]
+            st.session_state["origin_lat"] = lat
+            st.session_state["origin_lon"] = lon
+            st.info(f"クリックした地点を発生源に設定: 緯度 {lat:.5f}, 経度 {lon:.5f}")
+
+with right_loc:
+    st.markdown("**現在の発生源**")
+    st.write(
+        f"緯度: `{st.session_state['origin_lat']:.5f}`, "
+        f"経度: `{st.session_state['origin_lon']:.5f}`"
+    )
+
+    if st.button("この位置の気象情報を取得（OpenWeather）"):
+        w = fetch_openweather(st.session_state["origin_lat"], st.session_state["origin_lon"])
+        if w is not None:
+            st.session_state["weather_info"] = w
+            st.success("気象情報を取得しました。Gemini 解析に反映されます。")
+    weather_info = st.session_state["weather_info"]
+
+    if weather_info is not None:
+        st.markdown("**取得した気象情報（参考）**")
+        st.write(
+            f"- 気温: {weather_info['temp_c']:.1f} ℃\n"
+            f"- 相対湿度: {weather_info['humidity']:.0f} %\n"
+            f"- 風速: {weather_info['wind_speed']:.1f} m/s\n"
+            f"- 風向(deg): {weather_info.get('wind_deg', 'N/A')}\n"
+            f"- 天気: {weather_info.get('description', '')}"
+        )
+        st.caption("※必要に応じてサイドバーの風速・湿度・気温を手動で合わせてください。")
+
+# origin / weather をまとめておく
+origin_tuple: Optional[Tuple[float, float]] = (
+    st.session_state["origin_lat"],
+    st.session_state["origin_lon"],
+)
+weather_ctx: Optional[Dict[str, float]] = st.session_state["weather_info"]
+
+st.divider()
+
 # ------------------------------ 主要出力エリア（Geminiアンサンブル） ------------------------------
-outputs, ensemble_meta = run_gemini_ensemble(inputs)
+outputs, ensemble_meta = run_gemini_ensemble(inputs, origin_tuple, weather_ctx)
 
 m1, m2, m3, m4 = st.columns(4)
 metric_block(m1, "等価半径 (Gemini ensemble)", outputs.radius_m, "m")
@@ -654,7 +882,7 @@ with tab_help:
   - 「安全マージン重視」「資機材効率重視」「バランス型」の3ロールで並列推定
   - 各ロールは ±30% の範囲で補正された数値を JSON で返す
   - 3つの結果を重み付き平均して、最終的な推奨値を決定
-  - ヘッダのメトリクスはこのアンサンブル結果を表示
+  - 発生源位置と OpenWeather の気象情報を解析コンテキストに含める
 
 - **高速性の確保**
   - Gemini 呼び出しは主要出力の1回のみ（3ロールを並列実行）
