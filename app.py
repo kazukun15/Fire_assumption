@@ -8,6 +8,7 @@ Fire Spread Simulator Pro (Streamlit + Gemini 2.5 Flash Ensemble)
 - OpenWeather の気象情報を取得して解析に反映
 - 発生源からの延焼を、地図上で時間スライダー & 自動再生アニメーションで表示
 - 予測時間は「分・時間・日」の単位で指定可能（内部では分に換算）
+- Gemini の数値結果を、人が読みやすい日本語で要約・比較するタブを追加
 
 ■ 必要ライブラリ
 - streamlit
@@ -573,6 +574,11 @@ def to_json(outputs: Outputs) -> str:
     }
     return json.dumps(payload, ensure_ascii=False)
 
+def pct_diff(new: float, base: float) -> float:
+    if abs(base) < EPS:
+        return 0.0
+    return (new / base - 1.0) * 100.0
+
 # ------------------------------ セッション初期化 ------------------------------
 if "origin_lat" not in st.session_state:
     st.session_state["origin_lat"] = 35.681236  # 東京駅付近
@@ -581,7 +587,7 @@ if "origin_lon" not in st.session_state:
 if "weather_info" not in st.session_state:
     st.session_state["weather_info"] = None
 if "anim_t_sel" not in st.session_state:
-    st.session_state["anim_t_sel"] = 0.0
+    st.session_state["anim_t_sel"] = 0.0  # スライダーの現在値を保持（ループ内からは書き換えない）
 
 # ------------------------------ メインUI ------------------------------
 st.title("Fire Spread Simulator Pro")
@@ -820,9 +826,9 @@ st.caption(
     " 実際の地形・燃料・気象・活動状況によって結果は大きく変わります。"
 )
 
-# ------------------------------ タブ: グラフ / アニメ / データ / 感度 / 詳細 ------------------------------
-tab_main, tab_anim, tab_data, tab_sens, tab_detail = st.tabs(
-    ["📊 グラフ", "🌏 延焼アニメーション", "📁 データ出力", "🧪 感度分析", "🔍 詳細・ヘルプ"]
+# ------------------------------ タブ: グラフ / アニメ / データ / 感度 / 解説 / 詳細 ------------------------------
+tab_main, tab_anim, tab_data, tab_sens, tab_explain, tab_detail = st.tabs(
+    ["📊 グラフ", "🌏 延焼アニメーション", "📁 データ出力", "🧪 感度分析", "🧠 Gemini解析の解説", "🔍 詳細・ヘルプ"]
 )
 
 physical_for_plots = run_physical_model(inputs)
@@ -886,7 +892,7 @@ with tab_main:
     ax3.set_title("時間と必要水量の関係")
     st.pyplot(fig3)
 
-# ---- 延焼アニメーション（地図） ----
+# ---- 延焼アニメーション（地図・自動再生つき） ----
 with tab_anim:
     st.markdown("#### 地図上で見る延焼の広がり（スライダー + 自動再生）")
 
@@ -912,7 +918,7 @@ with tab_anim:
         current_t = float(st.session_state.get("anim_t_sel", 0.0))
         current_t = clamp(current_t, 0.0, max_t)
 
-        # スライダー（手動操作用）
+        # スライダー（手動操作用）: key="anim_t_sel"
         t_sel = st.slider(
             "経過時間[min]（スライダーで手動操作）",
             0.0,
@@ -1006,7 +1012,7 @@ with tab_anim:
             if st.button("▶️ 再生（0 〜 最大時間まで）"):
                 # 0 から max_t までアニメーション
                 for t_cur in np.arange(0.0, max_t + step_t, step_t):
-                    st.session_state["anim_t_sel"] = float(t_cur)
+                    # ここで session_state["anim_t_sel"] は書き換えない
                     render_frame(float(t_cur))
                     time.sleep(0.3)  # 再生速度
 
@@ -1090,6 +1096,104 @@ with tab_sens:
     axS.set_ylabel("必要水量[ton]")
     axS.set_title("パラメータ変更時の半径と必要水量")
     st.pyplot(figS)
+
+# ---- Gemini解析の解説 ----
+with tab_explain:
+    st.markdown("#### Gemini による解析結果の言語化")
+
+    if ensemble_meta["mode"] != "gemini_ensemble":
+        st.warning("Gemini が無効なため、物理モデルのみで計算しています。Gemini の解説は表示できません。")
+    else:
+        phys = ensemble_meta["physical"]
+        details = ensemble_meta["ensemble_details"]
+
+        st.markdown("##### 1. 物理モデルと最終アンサンブルの比較")
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.markdown("**物理モデル（基準値）**")
+            st.write(
+                f"- 等価半径: {phys['radius_m']:.1f} m\n"
+                f"- 延焼面積: {phys['area_sqm']:.0f} m²\n"
+                f"- 必要水量: {phys['water_volume_tons']:.1f} ton"
+            )
+        with col_b:
+            st.markdown("**Gemini アンサンブル（最終値）**")
+            st.write(
+                f"- 等価半径: {outputs.radius_m:.1f} m\n"
+                f"- 延焼面積: {outputs.area_sqm:.0f} m²\n"
+                f"- 必要水量: {outputs.water_volume_tons:.1f} ton"
+            )
+
+        d_r = pct_diff(outputs.radius_m, phys["radius_m"])
+        d_a = pct_diff(outputs.area_sqm, phys["area_sqm"])
+        d_w = pct_diff(outputs.water_volume_tons, phys["water_volume_tons"])
+
+        def sign_fmt(x: float) -> str:
+            return f"{x:+.1f}%"
+
+        st.markdown("**調整のイメージ**")
+        st.write(
+            f"- 等価半径: 物理モデル比 {sign_fmt(d_r)} の補正\n"
+            f"- 延焼面積: 物理モデル比 {sign_fmt(d_a)} の補正\n"
+            f"- 必要水量: 物理モデル比 {sign_fmt(d_w)} の補正"
+        )
+
+        st.caption(
+            "※プラス方向なら「安全マージン多め」、マイナス方向なら「資機材効率寄り」の傾向です。"
+        )
+
+        st.markdown("##### 2. 各ロールごとの考え方")
+
+        for role in details:
+            role_id = role["role_id"]
+            data = role["data"]
+            r = pct_diff(data["radius_m"], phys["radius_m"])
+            a_ = pct_diff(data["area_sqm"], phys["area_sqm"])
+            w_ = pct_diff(data["water_volume_tons"], phys["water_volume_tons"])
+
+            if role_id == "balanced":
+                title = "バランス型（balanced）"
+                desc = "物理モデルを基準にしつつ、大きくも小さくも振れすぎないように調整しています。"
+            elif role_id == "safety":
+                title = "安全マージン重視（safety）"
+                desc = "住民・隊員の安全を優先し、やや大きめに見積もる傾向があります。"
+            else:
+                title = "資機材効率重視（resource）"
+                desc = "限られた水・車両を前提に、必要量をやや抑え気味に見積もる傾向があります。"
+
+            with st.expander(f"{title} の結果と解説", expanded=(role_id == "balanced")):
+                st.markdown(desc)
+                st.write(
+                    f"- 等価半径: {data['radius_m']:.1f} m "
+                    f"(物理比 {sign_fmt(r)})\n"
+                    f"- 延焼面積: {data['area_sqm']:.0f} m² "
+                    f"(物理比 {sign_fmt(a_)})\n"
+                    f"- 必要水量: {data['water_volume_tons']:.1f} ton "
+                    f"(物理比 {sign_fmt(w_)})"
+                )
+
+                st.caption(
+                    "※「物理比」がプラスなら物理モデルより安全側、マイナスなら効率側に寄った判断です。"
+                )
+
+        st.markdown("##### 3. 現場での読み取り方（目安）")
+        st.markdown(
+            """
+- **等価半径が物理モデルより+10〜30%程度なら**  
+  → 「地形・風の変動などを見込んで、少し広めに危険範囲を見ておいた方がよい」という判断。
+
+- **必要水量が物理モデルより-10〜20%程度なら**  
+  → 「水利・ポンプ台数を考えると、このくらいなら現実的範囲」という効率寄りの見積もり。
+
+- **最終アンサンブル値は**  
+  - 安全型と効率型の中間を取りつつ、  
+  - 物理モデルから大きく離れない範囲（±30%以内）に抑えた「折衷案」です。
+
+このタブを見れば、「なぜこの数字になっているか」「安全寄りか効率寄りか」を
+直感的に把握できるようにしています。
+            """
+        )
 
 # ---- 詳細情報・ヘルプ ----
 with tab_detail:
