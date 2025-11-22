@@ -6,7 +6,7 @@ Fire Spread Simulator Pro (Streamlit + Gemini 2.5 Flash Ensemble)
 - Gemini を複数視点で並列実行し、重み付きアンサンブルで総合判断
 - 発生源の指定: 地図クリック / 住所検索 / 緯度・経度入力
 - OpenWeather の気象情報を取得して解析に反映
-- 発生源からの延焼を、地図上で時間スライダー & 自動再生アニメーションで表示
+- 発生源からの延焼を、地図上で時間スライダーで表示（自動再生機能は削除）
 - 予測時間は「分・時間・日」の単位で指定可能（内部では分に換算）
 - Gemini の数値結果を「世界一の消防士・災害スペシャリスト」として
   現状評価・延焼可能性・消火アドバイスの形で解説
@@ -40,7 +40,6 @@ import math
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import time  # アニメーション用
 
 import numpy as np
 import streamlit as st
@@ -589,7 +588,7 @@ if "origin_lon" not in st.session_state:
 if "weather_info" not in st.session_state:
     st.session_state["weather_info"] = None
 if "anim_t_sel" not in st.session_state:
-    st.session_state["anim_t_sel"] = 0.0  # スライダーの現在値を保持（ループ内からは書き換えない）
+    st.session_state["anim_t_sel"] = 0.0  # スライダーの現在値を保持
 
 # ------------------------------ メインUI ------------------------------
 st.title("Fire Spread Simulator Pro")
@@ -894,9 +893,9 @@ with tab_main:
     ax3.set_title("時間と必要水量の関係")
     st.pyplot(fig3)
 
-# ---- 延焼アニメーション（地図・自動再生つき） ----
+# ---- 延焼アニメーション（地図・スライダーのみ） ----
 with tab_anim:
-    st.markdown("#### 地図上で見る延焼の広がり（スライダー + 自動再生）")
+    st.markdown("#### 地図上で見る延焼の広がり（時間スライダー）")
 
     if not HAS_FOLIUM:
         st.warning(
@@ -909,20 +908,16 @@ with tab_anim:
 
         # 最大時間（分）とステップ
         max_t = max(5.0, float(inputs.duration_min))
-        n_steps = 30  # アニメーションのコマ数
+        n_steps = 30  # 表示の滑らかさ
         step_t = max(1.0, max_t / n_steps)
-
-        # 表示用プレースホルダ
-        time_placeholder = st.empty()
-        map_placeholder = st.empty()
 
         # 現在時間（スライダー値）をセッションから取得
         current_t = float(st.session_state.get("anim_t_sel", 0.0))
         current_t = clamp(current_t, 0.0, max_t)
 
-        # スライダー（手動操作用）: key="anim_t_sel"
+        # スライダー（手動操作）: key="anim_t_sel"
         t_sel = st.slider(
-            "経過時間[min]（スライダーで手動操作）",
+            "経過時間[min]",
             0.0,
             max_t,
             value=current_t,
@@ -930,99 +925,78 @@ with tab_anim:
             key="anim_t_sel",
         )
 
-        def render_frame(t_cur: float):
-            """指定時刻 t_cur[min] の延焼範囲を地図に描画"""
-            if t_cur <= 0.0:
-                tmp_inputs = Inputs(
-                    duration_min=0.0,
-                    wind_speed_ms=inputs.wind_speed_ms,
-                    wind_dir_deg=inputs.wind_dir_deg,
-                    rel_humidity=inputs.rel_humidity,
-                    air_temp_c=inputs.air_temp_c,
-                    slope_percent=inputs.slope_percent,
-                    fuel_class=inputs.fuel_class,
-                    init_radius_m=inputs.init_radius_m,
-                    attack_duration_min=inputs.attack_duration_min,
-                    app_rate_lpm_per_m=inputs.app_rate_lpm_per_m,
-                    efficiency=inputs.efficiency,
-                )
-            else:
-                tmp_inputs = Inputs(
-                    duration_min=float(t_cur),
-                    wind_speed_ms=inputs.wind_speed_ms,
-                    wind_dir_deg=inputs.wind_dir_deg,
-                    rel_humidity=inputs.rel_humidity,
-                    air_temp_c=inputs.air_temp_c,
-                    slope_percent=inputs.slope_percent,
-                    fuel_class=inputs.fuel_class,
-                    init_radius_m=inputs.init_radius_m,
-                    attack_duration_min=inputs.attack_duration_min,
-                    app_rate_lpm_per_m=inputs.app_rate_lpm_per_m,
-                    efficiency=inputs.efficiency,
-                )
-
-            o_t = run_physical_model(tmp_inputs)
-
-            time_placeholder.caption(
-                f"経過時間: {t_cur:.1f} 分 "
-                f"(約 {t_cur/60:.1f} 時間 / 約 {t_cur/1440:.2f} 日) / "
-                f"等価半径: {o_t.radius_m:.1f} m / "
-                f"延焼面積: {o_t.area_sqm:.0f} m²"
+        # 選択時間での延焼範囲を計算
+        if t_sel <= 0.0:
+            tmp_inputs = Inputs(
+                duration_min=0.0,
+                wind_speed_ms=inputs.wind_speed_ms,
+                wind_dir_deg=inputs.wind_dir_deg,
+                rel_humidity=inputs.rel_humidity,
+                air_temp_c=inputs.air_temp_c,
+                slope_percent=inputs.slope_percent,
+                fuel_class=inputs.fuel_class,
+                init_radius_m=inputs.init_radius_m,
+                attack_duration_min=inputs.attack_duration_min,
+                app_rate_lpm_per_m=inputs.app_rate_lpm_per_m,
+                efficiency=inputs.efficiency,
+            )
+        else:
+            tmp_inputs = Inputs(
+                duration_min=float(t_sel),
+                wind_speed_ms=inputs.wind_speed_ms,
+                wind_dir_deg=inputs.wind_dir_deg,
+                rel_humidity=inputs.rel_humidity,
+                air_temp_c=inputs.air_temp_c,
+                slope_percent=inputs.slope_percent,
+                fuel_class=inputs.fuel_class,
+                init_radius_m=inputs.init_radius_m,
+                attack_duration_min=inputs.attack_duration_min,
+                app_rate_lpm_per_m=inputs.app_rate_lpm_per_m,
+                efficiency=inputs.efficiency,
             )
 
-            # 風速に応じた長軸比を使って、楕円の中心シフト量を決定
-            lb = length_breadth_ratio(inputs.wind_speed_ms)
-            center_shift_factor = 0.5 * (1.0 - 1.0 / lb)  # 0〜0.4程度
+        o_t = run_physical_model(tmp_inputs)
 
-            poly_latlon = ellipse_polygon_latlon(
-                lat0,
-                lon0,
-                o_t.ellipse_a_m,
-                o_t.ellipse_b_m,
-                inputs.wind_dir_deg,
-                center_shift_factor=center_shift_factor,
-                n_points=180,
-            )
+        st.caption(
+            f"経過時間: {t_sel:.1f} 分 "
+            f"(約 {t_sel/60:.1f} 時間 / 約 {t_sel/1440:.2f} 日) / "
+            f"等価半径: {o_t.radius_m:.1f} m / "
+            f"延焼面積: {o_t.area_sqm:.0f} m²"
+        )
 
-            m_anim = folium.Map(
-                location=[lat0, lon0],
-                zoom_start=16,  # 近めのスケール
-                tiles="OpenStreetMap",
-            )
-            folium.Marker(
-                location=[lat0, lon0],
-                popup="発生源",
-                icon=folium.Icon(color="red", icon="fire"),
-            ).add_to(m_anim)
-            folium.Polygon(
-                locations=poly_latlon,
-                color="orange",
-                fill=True,
-                fill_opacity=0.35,
-                popup=f"{t_cur:.1f} 分後の推定延焼範囲",
-            ).add_to(m_anim)
+        # 風速に応じた長軸比を使って、楕円の中心シフト量を決定
+        lb = length_breadth_ratio(inputs.wind_speed_ms)
+        center_shift_factor = 0.5 * (1.0 - 1.0 / lb)  # 0〜0.4程度
 
-            with map_placeholder:
-                st_folium(m_anim, width=800, height=480, returned_objects=[])
+        poly_latlon = ellipse_polygon_latlon(
+            lat0,
+            lon0,
+            o_t.ellipse_a_m,
+            o_t.ellipse_b_m,
+            inputs.wind_dir_deg,
+            center_shift_factor=center_shift_factor,
+            n_points=180,
+        )
 
-        # まずスライダーの値で1フレーム表示
-        render_frame(t_sel)
+        m_anim = folium.Map(
+            location=[lat0, lon0],
+            zoom_start=16,  # 近めのスケール
+            tiles="OpenStreetMap",
+        )
+        folium.Marker(
+            location=[lat0, lon0],
+            popup="発生源",
+            icon=folium.Icon(color="red", icon="fire"),
+        ).add_to(m_anim)
+        folium.Polygon(
+            locations=poly_latlon,
+            color="orange",
+            fill=True,
+            fill_opacity=0.35,
+            popup=f"{t_sel:.1f} 分後の推定延焼範囲",
+        ).add_to(m_anim)
 
-        # 自動再生ボタン
-        play_col, info_col = st.columns([1, 3])
-        with play_col:
-            if st.button("▶️ 再生（0 〜 最大時間まで）"):
-                # 0 から max_t までアニメーション
-                for t_cur in np.arange(0.0, max_t + step_t, step_t):
-                    # session_state["anim_t_sel"] は書き換えない（エラー回避）
-                    render_frame(float(t_cur))
-                    time.sleep(0.3)  # 再生速度
-
-        with info_col:
-            st.caption(
-                "▶️ 再生ボタンを押すと、0分から設定した予測時間まで、"
-                "延焼範囲が時間経過とともに変化する様子を自動再生します。"
-            )
+        st_folium(m_anim, width=800, height=480, returned_objects=[])
 
 # ---- データ出力 ----
 with tab_data:
@@ -1148,7 +1122,7 @@ with tab_explain:
         # --- 2. 延焼の可能性（どこまで広がりうるかの目安） ---
         st.markdown("##### 2. 延焼の可能性（どこまで広がりうるか）")
 
-        # 単純な目安レベル分け（消防士の「感覚的コメント」用）
+        # 単純な目安レベル分け
         level_text = ""
         if outputs.radius_m < 100:
             level_text = "建物火災〜小規模な林野火災レベルで、エリアとしては比較的コンパクトです。"
@@ -1171,10 +1145,9 @@ with tab_explain:
         # --- 3. 消火・対応のポイント（数値から読み取れる戦略） ---
         st.markdown("##### 3. 消火・対応のポイント（水量・時間からの作戦イメージ）")
 
-        # ざっくりしたポンプ台数目安（1台 2,400 L/min = 2.4 ton/min 相当と仮定）
-        # 実務とは異なるが、「どのくらいのポンプが必要そうか」の感覚用
+        # 仮のポンプ能力（1台 2.4 ton/min）
         if inputs.attack_duration_min > 0:
-            ton_per_min_per_pump = 2.4  # 仮定
+            ton_per_min_per_pump = 2.4
             total_min = inputs.attack_duration_min
             if total_min <= 0:
                 total_min = 1.0
@@ -1256,11 +1229,10 @@ with tab_detail:
   - 各ロールは ±30% の範囲で補正された数値を JSON で返し、重み付き平均で最終値を決定
   - 発生源位置と OpenWeather の気象情報を解析コンテキストに含めます
 
-- **延焼アニメーション（スライダー + 自動再生）**
-  - スライダー: 任意の時間の延焼範囲を即座に確認
-  - ▶️再生ボタン: 0分から設定した予測時間まで、延焼範囲の変化を自動で連続表示
+- **延焼アニメーション（時間スライダー）**
+  - スライダーを動かすことで、任意の時間における延焼範囲を即座に確認できます。
   - 風速に応じた長軸/短軸比から「中心の風下方向へのシフト量」を計算し、
-    発生源がやや後端寄り・火頭が風下に伸びる形状を表現
+    発生源がやや後端寄り・火頭が風下に伸びる形状を表現しています。
         """
     )
 
