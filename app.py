@@ -5,33 +5,43 @@ Fire Spread Simulator Pro (Streamlit + Gemini 2.5 Flash Ensemble)
 - 物理モデル + Gemini 2.5 Flash を組み合わせたハイブリッド火災拡大シミュレーション
 - Gemini を複数視点で並列実行し、重み付きアンサンブルで総合判断
 - 発生源の指定: 地図クリック / 住所検索 / 緯度・経度入力
-- OpenWeather の気象情報を取得して解析に反映
-- 発生源からの延焼を、地図上で時間スライダーで表示（自動再生機能は削除）
+- OpenWeather の気象情報を取得し、オプションで計算にも直接反映
+- 発生源からの延焼を、2D/3D の地図上で時間スライダー表示（自動再生はなし）
 - 予測時間は「分・時間・日」の単位で指定可能（内部では分に換算）
 - Gemini の数値結果を「世界一の消防士・災害スペシャリスト」として
   現状評価・延焼可能性・消火アドバイスの形で解説
 
-■ 必要ライブラリ
-- streamlit
-- numpy
-- matplotlib
-- google-generativeai
-- requests
-- folium
-- streamlit-folium
+■ 必要ライブラリ (requirements.txt 例)
+streamlit
+numpy
+matplotlib
+google-generativeai
+requests
+folium
+streamlit-folium
+pydeck
 
 ■ 起動
 streamlit run app.py
 
-■ .streamlit/secrets.toml 例
+■ .streamlit/secrets.toml 例（ユーザーの設定に合わせて）
 [general]
 api_key = "YOUR_GOOGLE_API_KEY"               # Gemini 用（Google API Key）
+
+[tavily]
+api_key = "..."
 
 [mapbox]
 access_token = "YOUR_MAPBOX_ACCESS_TOKEN"     # ジオコーディング用
 
+[yahoo]
+appid = "..."
+
 [openweather]
 api_key = "YOUR_OPENWEATHER_API_KEY"         # 気象情報取得用
+
+[firms]
+map_key = "..."
 """
 
 from __future__ import annotations
@@ -50,6 +60,7 @@ import requests
 import urllib.parse
 import folium
 import google.generativeai as genai
+import pydeck as pdk  # 3D 表示用
 
 # ---- streamlit_folium の安全なインポート ----
 try:
@@ -283,6 +294,34 @@ def fetch_openweather(lat: float, lon: float) -> Optional[Dict[str, float]]:
         st.error(f"気象情報取得中にエラーが発生しました: {e}")
         return None
 
+# ---- 気象APIを計算にも反映する「リアルモード」 ----
+def build_effective_inputs(
+    inputs: Inputs,
+    weather: Optional[Dict[str, float]],
+    use_weather: bool,
+) -> Inputs:
+    """
+    use_weather=True & weather 有りの場合、
+    風速・湿度・気温（＋風向があれば）を OpenWeather の値で上書きした Inputs を返す。
+    それ以外は元の inputs をそのまま返す。
+    """
+    if not (use_weather and weather):
+        return inputs
+
+    return Inputs(
+        duration_min=inputs.duration_min,
+        wind_speed_ms=float(weather["wind_speed"]),
+        wind_dir_deg=inputs.wind_dir_deg if weather.get("wind_deg") is None else float(weather["wind_deg"]),
+        rel_humidity=float(weather["humidity"]),
+        air_temp_c=float(weather["temp_c"]),
+        slope_percent=inputs.slope_percent,
+        fuel_class=inputs.fuel_class,
+        init_radius_m=inputs.init_radius_m,
+        attack_duration_min=inputs.attack_duration_min,
+        app_rate_lpm_per_m=inputs.app_rate_lpm_per_m,
+        efficiency=inputs.efficiency,
+    )
+
 # ------------------------------ Gemini 2.5 Flash 設定 ------------------------------
 def get_gemini_model() -> Optional[genai.GenerativeModel]:
     try:
@@ -334,13 +373,13 @@ def build_gemini_prompt(
 [外部気象情報(OpenWeather)]
 - {wstr}
 
-[入力条件（ユーザー入力）]
+[入力条件（有効値）]
 - 燃料種: {inputs.fuel_class}
 - 予測時間: {inputs.duration_min:.1f} 分
-- 風速(入力値): {inputs.wind_speed_ms:.1f} m/s
-- 風向(入力値): {inputs.wind_dir_deg:.0f} 度 (0=北, 90=東)
-- 相対湿度(入力値): {inputs.rel_humidity:.0f} %
-- 気温(入力値): {inputs.air_temp_c:.1f} ℃
+- 風速(有効値): {inputs.wind_speed_ms:.1f} m/s
+- 風向(有効値): {inputs.wind_dir_deg:.0f} 度 (0=北, 90=東)
+- 相対湿度(有効値): {inputs.rel_humidity:.0f} %
+- 気温(有効値): {inputs.air_temp_c:.1f} ℃
 - 斜面勾配: {inputs.slope_percent:.1f} %
 - 初期半径: {inputs.init_radius_m:.1f} m
 - 散水比率: {inputs.app_rate_lpm_per_m:.2f} L/min/m
@@ -594,6 +633,7 @@ if "anim_t_sel" not in st.session_state:
 st.title("Fire Spread Simulator Pro")
 st.caption("Save Your Self / 火災拡大シミュレーション（Gemini 2.5 Flash Ensemble）")
 
+# ---- サイドバー: 基本設定 ----
 with st.sidebar:
     st.header("基本条件")
 
@@ -657,7 +697,7 @@ with st.sidebar:
         air_temp_c = st.slider("気温[°C]", -10, 50, 25, 1)
 
     st.caption(
-        f"※内部計算では {duration_min:.0f} 分（約 {duration_min/60:.1f} 時間）として扱います。"
+        f"※内部計算ではいったん {duration_min:.0f} 分（約 {duration_min/60:.1f} 時間）として扱います。"
     )
 
     st.markdown("---")
@@ -784,7 +824,7 @@ with right_loc:
         w = fetch_openweather(st.session_state["origin_lat"], st.session_state["origin_lon"])
         if w is not None:
             st.session_state["weather_info"] = w
-            st.success("気象情報を取得しました。Gemini 解析に反映されます。")
+            st.success("気象情報を取得しました。Gemini と計算に利用できます。")
     weather_info = st.session_state["weather_info"]
 
     if weather_info is not None:
@@ -796,7 +836,13 @@ with right_loc:
             f"- 風向(deg): {weather_info.get('wind_deg', 'N/A')}\n"
             f"- 天気: {weather_info.get('description', '')}"
         )
-        st.caption("※必要に応じてサイドバーの風速・湿度・気温を手動で合わせてください。")
+        st.caption("※この値を計算にも反映するかは、下のチェックで切り替えできます。")
+
+    use_weather_flag = st.checkbox(
+        "気象API(OpenWeather)の値を計算にも反映する（リアルモード）",
+        value=True,
+        help="ON の場合、風速・湿度・気温（風向があれば風向）を OpenWeather の値で上書きして延焼計算します。",
+    )
 
 origin_tuple: Optional[Tuple[float, float]] = (
     st.session_state["origin_lat"],
@@ -804,12 +850,15 @@ origin_tuple: Optional[Tuple[float, float]] = (
 )
 weather_ctx: Optional[Dict[str, float]] = st.session_state["weather_info"]
 
+# 有効な入力（リアルモード反映後）を作成
+effective_inputs = build_effective_inputs(inputs, weather_ctx, use_weather_flag)
+
 st.markdown("---")
 
-# ------------------------------ 2. 解析実行と結果 ------------------------------
+# ------------------------------ 2. 解析結果（Gemini + 物理） ------------------------------
 st.subheader("2. 解析結果（Gemini アンサンブル + 物理モデル）")
 
-outputs, ensemble_meta = run_gemini_ensemble(inputs, origin_tuple, weather_ctx)
+outputs, ensemble_meta = run_gemini_ensemble(effective_inputs, origin_tuple, weather_ctx)
 
 m1, m2, m3, m4 = st.columns(4)
 metric_block(m1, "等価半径", outputs.radius_m, "m")
@@ -827,95 +876,49 @@ st.caption(
     " 実際の地形・燃料・気象・活動状況によって結果は大きく変わります。"
 )
 
-# ------------------------------ タブ: グラフ / アニメ / データ / 感度 / 解説 / 詳細 ------------------------------
-tab_main, tab_anim, tab_data, tab_sens, tab_explain, tab_detail = st.tabs(
-    ["📊 グラフ", "🌏 延焼アニメーション", "📁 データ出力", "🧪 感度分析", "🧠 Gemini解析の解説", "🔍 詳細・ヘルプ"]
+# ------------------------------ タブ構成 ------------------------------
+tab_anim, tab_main, tab_data, tab_sens, tab_explain, tab_detail = st.tabs(
+    [
+        "🌏 延焼マップ（2D/3D）",
+        "📊 詳細グラフ（任意）",
+        "📁 データ出力",
+        "🧪 感度分析",
+        "🧠 Gemini解析の解説",
+        "🔍 詳細・ヘルプ",
+    ]
 )
 
-physical_for_plots = run_physical_model(inputs)
+physical_for_plots = run_physical_model(effective_inputs)
 
-# ---- メイングラフ ----
-with tab_main:
-    st.markdown("#### 延焼形状（物理モデル）")
-
-    fig1, ax1 = plt.subplots(figsize=(5.5, 5.5))
-    a = physical_for_plots.ellipse_a_m
-    b = physical_for_plots.ellipse_b_m
-    t = np.linspace(0, 2 * np.pi, 400)
-    x = a * np.cos(t)
-    y = b * np.sin(t)
-    theta = math.radians(90 - inputs.wind_dir_deg)
-    rot = np.array([[math.cos(theta), -math.sin(theta)],
-                    [math.sin(theta),  math.cos(theta)]])
-    xy = rot @ np.vstack([x, y])
-    ax1.plot(xy[0], xy[1], linewidth=2)
-    ax1.scatter([0], [0], marker="*", s=120)
-    ax1.set_aspect("equal", "box")
-    ax1.set_xlabel("X [m]")
-    ax1.set_ylabel("Y [m]")
-    ax1.set_title("延焼楕円（上から見た図）")
-    st.pyplot(fig1)
-
-    st.markdown("#### 時間とともに変化する半径・水量（物理モデル）")
-
-    fig2, ax2 = plt.subplots(figsize=(6.5, 4))
-    times = np.linspace(max(1.0, inputs.duration_min / 20), inputs.duration_min, 40)
-    radii = []
-    waters = []
-    for tt in times:
-        o = run_physical_model(
-            Inputs(
-                duration_min=float(tt),
-                wind_speed_ms=inputs.wind_speed_ms,
-                wind_dir_deg=inputs.wind_dir_deg,
-                rel_humidity=inputs.rel_humidity,
-                air_temp_c=inputs.air_temp_c,
-                slope_percent=inputs.slope_percent,
-                fuel_class=inputs.fuel_class,
-                init_radius_m=inputs.init_radius_m,
-                attack_duration_min=inputs.attack_duration_min,
-                app_rate_lpm_per_m=inputs.app_rate_lpm_per_m,
-                efficiency=inputs.efficiency,
-            )
-        )
-        radii.append(o.radius_m)
-        waters.append(o.water_volume_tons)
-    ax2.plot(times, radii, linewidth=2)
-    ax2.set_xlabel("時間[min]")
-    ax2.set_ylabel("半径[m]")
-    ax2.set_title("時間と半径の関係")
-    st.pyplot(fig2)
-
-    fig3, ax3 = plt.subplots(figsize=(6.5, 4))
-    ax3.plot(times, waters, linewidth=2)
-    ax3.set_xlabel("時間[min]")
-    ax3.set_ylabel("必要水量[ton]")
-    ax3.set_title("時間と必要水量の関係")
-    st.pyplot(fig3)
-
-# ---- 延焼アニメーション（地図・スライダーのみ） ----
+# ---- 延焼マップ（2D/3D） ----
 with tab_anim:
-    st.markdown("#### 地図上で見る延焼の広がり（時間スライダー）")
+    st.markdown("#### 地図上で見る延焼の広がり（時間スライダー & 2D/3D 切替）")
 
     if not HAS_FOLIUM:
         st.warning(
-            "延焼アニメーションを表示するには `streamlit-folium` が必要です。\n"
+            "2D マップ表示には `streamlit-folium` が必要です。\n"
             "requirements.txt に `streamlit-folium` を追加してください。",
             icon="ℹ️",
         )
     else:
         lat0, lon0 = origin_tuple
 
-        # 最大時間（分）とステップ
-        max_t = max(5.0, float(inputs.duration_min))
-        n_steps = 30  # 表示の滑らかさ
+        # 2D / 3D 切り替え
+        map_mode = st.radio(
+            "地図モード",
+            options=["2D（標準地図）", "3D（試験的）"],
+            index=0,
+            horizontal=True,
+        )
+
+        # 時間スライダー
+        max_t = max(5.0, float(effective_inputs.duration_min))
+        n_steps = 30
         step_t = max(1.0, max_t / n_steps)
 
-        # 現在時間（スライダー値）をセッションから取得
         current_t = float(st.session_state.get("anim_t_sel", 0.0))
         current_t = clamp(current_t, 0.0, max_t)
 
-        # スライダー（手動操作）: key="anim_t_sel"
         t_sel = st.slider(
             "経過時間[min]",
             0.0,
@@ -929,30 +932,30 @@ with tab_anim:
         if t_sel <= 0.0:
             tmp_inputs = Inputs(
                 duration_min=0.0,
-                wind_speed_ms=inputs.wind_speed_ms,
-                wind_dir_deg=inputs.wind_dir_deg,
-                rel_humidity=inputs.rel_humidity,
-                air_temp_c=inputs.air_temp_c,
-                slope_percent=inputs.slope_percent,
-                fuel_class=inputs.fuel_class,
-                init_radius_m=inputs.init_radius_m,
-                attack_duration_min=inputs.attack_duration_min,
-                app_rate_lpm_per_m=inputs.app_rate_lpm_per_m,
-                efficiency=inputs.efficiency,
+                wind_speed_ms=effective_inputs.wind_speed_ms,
+                wind_dir_deg=effective_inputs.wind_dir_deg,
+                rel_humidity=effective_inputs.rel_humidity,
+                air_temp_c=effective_inputs.air_temp_c,
+                slope_percent=effective_inputs.slope_percent,
+                fuel_class=effective_inputs.fuel_class,
+                init_radius_m=effective_inputs.init_radius_m,
+                attack_duration_min=effective_inputs.attack_duration_min,
+                app_rate_lpm_per_m=effective_inputs.app_rate_lpm_per_m,
+                efficiency=effective_inputs.efficiency,
             )
         else:
             tmp_inputs = Inputs(
                 duration_min=float(t_sel),
-                wind_speed_ms=inputs.wind_speed_ms,
-                wind_dir_deg=inputs.wind_dir_deg,
-                rel_humidity=inputs.rel_humidity,
-                air_temp_c=inputs.air_temp_c,
-                slope_percent=inputs.slope_percent,
-                fuel_class=inputs.fuel_class,
-                init_radius_m=inputs.init_radius_m,
-                attack_duration_min=inputs.attack_duration_min,
-                app_rate_lpm_per_m=inputs.app_rate_lpm_per_m,
-                efficiency=inputs.efficiency,
+                wind_speed_ms=effective_inputs.wind_speed_ms,
+                wind_dir_deg=effective_inputs.wind_dir_deg,
+                rel_humidity=effective_inputs.rel_humidity,
+                air_temp_c=effective_inputs.air_temp_c,
+                slope_percent=effective_inputs.slope_percent,
+                fuel_class=effective_inputs.fuel_class,
+                init_radius_m=effective_inputs.init_radius_m,
+                attack_duration_min=effective_inputs.attack_duration_min,
+                app_rate_lpm_per_m=effective_inputs.app_rate_lpm_per_m,
+                efficiency=effective_inputs.efficiency,
             )
 
         o_t = run_physical_model(tmp_inputs)
@@ -965,7 +968,7 @@ with tab_anim:
         )
 
         # 風速に応じた長軸比を使って、楕円の中心シフト量を決定
-        lb = length_breadth_ratio(inputs.wind_speed_ms)
+        lb = length_breadth_ratio(effective_inputs.wind_speed_ms)
         center_shift_factor = 0.5 * (1.0 - 1.0 / lb)  # 0〜0.4程度
 
         poly_latlon = ellipse_polygon_latlon(
@@ -973,30 +976,136 @@ with tab_anim:
             lon0,
             o_t.ellipse_a_m,
             o_t.ellipse_b_m,
-            inputs.wind_dir_deg,
+            effective_inputs.wind_dir_deg,
             center_shift_factor=center_shift_factor,
             n_points=180,
         )
 
-        m_anim = folium.Map(
-            location=[lat0, lon0],
-            zoom_start=16,  # 近めのスケール
-            tiles="OpenStreetMap",
-        )
-        folium.Marker(
-            location=[lat0, lon0],
-            popup="発生源",
-            icon=folium.Icon(color="red", icon="fire"),
-        ).add_to(m_anim)
-        folium.Polygon(
-            locations=poly_latlon,
-            color="orange",
-            fill=True,
-            fill_opacity=0.35,
-            popup=f"{t_sel:.1f} 分後の推定延焼範囲",
-        ).add_to(m_anim)
+        if map_mode.startswith("2D"):
+            # ---- 2D (folium) ----
+            m_anim = folium.Map(
+                location=[lat0, lon0],
+                zoom_start=16,
+                tiles="OpenStreetMap",
+            )
+            folium.Marker(
+                location=[lat0, lon0],
+                popup="発生源",
+                icon=folium.Icon(color="red", icon="fire"),
+            ).add_to(m_anim)
+            folium.Polygon(
+                locations=poly_latlon,
+                color="orange",
+                fill=True,
+                fill_opacity=0.35,
+                popup=f"{t_sel:.1f} 分後の推定延焼範囲",
+            ).add_to(m_anim)
 
-        st_folium(m_anim, width=800, height=480, returned_objects=[])
+            st_folium(m_anim, width=800, height=480, returned_objects=[])
+
+        else:
+            # ---- 3D (pydeck) ----
+            # PolygonLayer 用のデータ（経度, 緯度の順）
+            poly_coords = [(lon, lat) for lat, lon in poly_latlon]
+            data = [
+                {
+                    "polygon": poly_coords,
+                    "height": max(10.0, o_t.radius_m / 2.0),
+                }
+            ]
+
+            layer = pdk.Layer(
+                "PolygonLayer",
+                data,
+                get_polygon="polygon",
+                get_elevation="height",
+                elevation_scale=1,
+                extruded=True,
+                pickable=False,
+                get_fill_color=[255, 140, 0, 140],  # 濃いめオレンジ
+                get_line_color=[200, 80, 0, 200],
+            )
+
+            view_state = pdk.ViewState(
+                latitude=lat0,
+                longitude=lon0,
+                zoom=15,
+                pitch=45,
+                bearing=0,
+            )
+
+            deck = pdk.Deck(
+                layers=[layer],
+                initial_view_state=view_state,
+                map_style=None,  # ベースマップなし（必要なら mapbox のスタイルに変更）
+                tooltip={"text": "推定延焼範囲"},
+            )
+
+            st.pydeck_chart(deck)
+
+# ---- 詳細グラフ（任意） ----
+with tab_main:
+    with st.expander("延焼形状と時間変化のグラフを見る（必要な場合のみ）", expanded=False):
+        st.markdown("#### 延焼形状（物理モデル）")
+
+        fig1, ax1 = plt.subplots(figsize=(5.5, 5.5))
+        a = physical_for_plots.ellipse_a_m
+        b = physical_for_plots.ellipse_b_m
+        t = np.linspace(0, 2 * np.pi, 400)
+        x = a * np.cos(t)
+        y = b * np.sin(t)
+        theta = math.radians(90 - effective_inputs.wind_dir_deg)
+        rot = np.array([[math.cos(theta), -math.sin(theta)],
+                        [math.sin(theta),  math.cos(theta)]])
+        xy = rot @ np.vstack([x, y])
+        ax1.plot(xy[0], xy[1], linewidth=2)
+        ax1.scatter([0], [0], marker="*", s=120)
+        ax1.set_aspect("equal", "box")
+        ax1.set_xlabel("X [m]")
+        ax1.set_ylabel("Y [m]")
+        ax1.set_title("延焼楕円（上から見た図）")
+        st.pyplot(fig1)
+
+        st.markdown("#### 時間とともに変化する半径・水量（物理モデル）")
+
+        fig2, ax2 = plt.subplots(figsize=(6.5, 4))
+        times = np.linspace(
+            max(1.0, effective_inputs.duration_min / 20),
+            effective_inputs.duration_min,
+            40,
+        )
+        radii = []
+        waters = []
+        for tt in times:
+            o = run_physical_model(
+                Inputs(
+                    duration_min=float(tt),
+                    wind_speed_ms=effective_inputs.wind_speed_ms,
+                    wind_dir_deg=effective_inputs.wind_dir_deg,
+                    rel_humidity=effective_inputs.rel_humidity,
+                    air_temp_c=effective_inputs.air_temp_c,
+                    slope_percent=effective_inputs.slope_percent,
+                    fuel_class=effective_inputs.fuel_class,
+                    init_radius_m=effective_inputs.init_radius_m,
+                    attack_duration_min=effective_inputs.attack_duration_min,
+                    app_rate_lpm_per_m=effective_inputs.app_rate_lpm_per_m,
+                    efficiency=effective_inputs.efficiency,
+                )
+            )
+            radii.append(o.radius_m)
+            waters.append(o.water_volume_tons)
+        ax2.plot(times, radii, linewidth=2)
+        ax2.set_xlabel("時間[min]")
+        ax2.set_ylabel("半径[m]")
+        ax2.set_title("時間と半径の関係")
+        st.pyplot(fig2)
+
+        fig3, ax3 = plt.subplots(figsize=(6.5, 4))
+        ax3.plot(times, waters, linewidth=2)
+        ax3.set_xlabel("時間[min]")
+        ax3.set_ylabel("必要水量[ton]")
+        ax3.set_title("時間と必要水量の関係")
+        st.pyplot(fig3)
 
 # ---- データ出力 ----
 with tab_data:
@@ -1035,28 +1144,29 @@ with tab_sens:
 
     axis = st.selectbox("変更パラメータ", ["風速", "湿度", "斜面勾配", "燃料種"], index=0)
 
+    base = effective_inputs
     scenarios: List[Tuple[str, Inputs]] = []
 
     if axis == "風速":
-        winds = [max(0.0, inputs.wind_speed_ms + d) for d in (-3, 0, +3, +6)]
+        winds = [max(0.0, base.wind_speed_ms + d) for d in (-3, 0, +3, +6)]
         for w in winds:
             label = f"風速 {w:.1f} m/s"
-            scenarios.append((label, Inputs(**{**inputs.__dict__, "wind_speed_ms": w})))
+            scenarios.append((label, Inputs(**{**base.__dict__, "wind_speed_ms": w})))
     elif axis == "湿度":
-        rhs = [clamp(inputs.rel_humidity + d, 5, 100) for d in (-20, 0, +20, +40)]
+        rhs = [clamp(base.rel_humidity + d, 5, 100) for d in (-20, 0, +20, +40)]
         for r in rhs:
             label = f"湿度 {r:.0f}%"
-            scenarios.append((label, Inputs(**{**inputs.__dict__, "rel_humidity": r})))
+            scenarios.append((label, Inputs(**{**base.__dict__, "rel_humidity": r})))
     elif axis == "斜面勾配":
-        slopes = [clamp(inputs.slope_percent + d, 0, 100) for d in (-10, 0, +10, +20)]
+        slopes = [clamp(base.slope_percent + d, 0, 100) for d in (-10, 0, +10, +20)]
         for s in slopes:
             label = f"勾配 {s:.0f}%"
-            scenarios.append((label, Inputs(**{**inputs.__dict__, "slope_percent": s})))
+            scenarios.append((label, Inputs(**{**base.__dict__, "slope_percent": s})))
     else:
         fuels = ["grass", "shrub", "timber"]
         for f in fuels:
             label = f"燃料 {f}"
-            scenarios.append((label, Inputs(**{**inputs.__dict__, "fuel_class": f})))
+            scenarios.append((label, Inputs(**{**base.__dict__, "fuel_class": f})))
 
     figS, axS = plt.subplots(figsize=(6.5, 4))
     for label, sc_inp in scenarios:
@@ -1119,11 +1229,9 @@ with tab_explain:
             "※プラス側なら『余裕を持って広め・多めに見ている』、マイナス側なら『資機材制約を意識して絞っている』というイメージです。"
         )
 
-        # --- 2. 延焼の可能性（どこまで広がりうるかの目安） ---
+        # --- 2. 延焼の可能性 ---
         st.markdown("##### 2. 延焼の可能性（どこまで広がりうるか）")
 
-        # 単純な目安レベル分け
-        level_text = ""
         if outputs.radius_m < 100:
             level_text = "建物火災〜小規模な林野火災レベルで、エリアとしては比較的コンパクトです。"
         elif outputs.radius_m < 500:
@@ -1142,13 +1250,12 @@ with tab_explain:
             "ここでは『素の燃え広がり方』の目安として捉えてください。"
         )
 
-        # --- 3. 消火・対応のポイント（数値から読み取れる戦略） ---
+        # --- 3. 消火・対応のポイント ---
         st.markdown("##### 3. 消火・対応のポイント（水量・時間からの作戦イメージ）")
 
-        # 仮のポンプ能力（1台 2.4 ton/min）
-        if inputs.attack_duration_min > 0:
-            ton_per_min_per_pump = 2.4
-            total_min = inputs.attack_duration_min
+        if effective_inputs.attack_duration_min > 0:
+            ton_per_min_per_pump = 2.4  # 仮置き
+            total_min = effective_inputs.attack_duration_min
             if total_min <= 0:
                 total_min = 1.0
             est_pumps = outputs.water_volume_tons / (ton_per_min_per_pump * total_min)
@@ -1157,7 +1264,7 @@ with tab_explain:
 
         st.write(
             f"- 必要水量の目安: **約 {outputs.water_volume_tons:.1f} ton**\n"
-            f"- 初期攻勢時間: 約 **{inputs.attack_duration_min:.0f} 分** を想定\n"
+            f"- 初期攻勢時間: 約 **{effective_inputs.attack_duration_min:.0f} 分** を想定\n"
             f"- 仮に1台あたり毎分約 2.4 ton 出せるポンプとすると、\n"
             f"  → 必要ポンプ台数のざっくり目安: **{est_pumps:.1f} 台分の能力**"
         )
@@ -1180,7 +1287,7 @@ with tab_explain:
             """
         )
 
-        # --- 4. 各ロールの違い（簡潔に） ---
+        # --- 4. 各ロールの違い ---
         st.markdown("##### 4. 各ロールごとの見立ての違い")
 
         for role in details:
@@ -1229,10 +1336,14 @@ with tab_detail:
   - 各ロールは ±30% の範囲で補正された数値を JSON で返し、重み付き平均で最終値を決定
   - 発生源位置と OpenWeather の気象情報を解析コンテキストに含めます
 
-- **延焼アニメーション（時間スライダー）**
-  - スライダーを動かすことで、任意の時間における延焼範囲を即座に確認できます。
-  - 風速に応じた長軸/短軸比から「中心の風下方向へのシフト量」を計算し、
-    発生源がやや後端寄り・火頭が風下に伸びる形状を表現しています。
+- **リアルモード**
+  - 「気象APIの値を計算にも反映する」を ON にすると、
+    風速・湿度・気温（風向もあれば）を OpenWeather の観測値で上書きした Inputs を使って計算します。
+  - 現場入力と観測値を簡単に切り替えて比較できます。
+
+- **延焼マップ（2D/3D）**
+  - 2D: folium + OpenStreetMap で平面表示
+  - 3D: pydeck の PolygonLayer で延焼楕円を立体表示（高さは半径に応じた目安）
         """
     )
 
