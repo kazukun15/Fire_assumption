@@ -6,6 +6,7 @@ Fire Spread Simulator Pro (Streamlit + Gemini 2.5 Flash Ensemble)
 - Gemini を複数視点で並列実行し、重み付きアンサンブルで総合判断
 - 地図上クリック / 住所検索 / 緯度経度で発生源を指定
 - 指定地点の気象情報(OpenWeather)を取得し、より詳細な解析に反映
+- 延焼楕円を地図上に時間スライダーで“アニメーション風”に表示
 - UI は世界標準的なダッシュボード構成
 
 ■ 必要ライブラリ
@@ -47,7 +48,7 @@ import urllib.parse
 import folium
 import google.generativeai as genai
 
-# ---- streamlit_folium の安全なインポート（ここが修正ポイント）----
+# ---- streamlit_folium の安全なインポート ----
 try:
     from streamlit_folium import st_folium
     HAS_FOLIUM = True
@@ -64,7 +65,7 @@ st.set_page_config(
 
 # ---- 日本語フォント設定（グラフ文字化け対策） ----
 try:
-    matplotlib.rcParams["font.family"] = "IPAexGothic"
+    matplotlib.rcParams["font.family"] = "IPAexGothic"  # 環境にあれば使われる
 except Exception:
     pass
 matplotlib.rcParams["axes.unicode_minus"] = False
@@ -470,6 +471,45 @@ def run_gemini_ensemble(
     }
     return agg, meta
 
+# ------------------------------ Geoユーティリティ（延焼楕円→緯度経度） ------------------------------
+def meters_to_latlon(lat0: float, lon0: float, dx_m: float, dy_m: float) -> Tuple[float, float]:
+    """
+    原点(lat0, lon0) からのオフセット dx,dy[m] を緯度経度に変換
+    dx: 東向き[m], dy: 北向き[m]
+    """
+    R = 6378137.0  # WGS84
+    dlat = (dy_m / R) * (180.0 / math.pi)
+    dlon = (dx_m / (R * math.cos(math.radians(lat0)))) * (180.0 / math.pi)
+    return lat0 + dlat, lon0 + dlon
+
+def ellipse_polygon_latlon(
+    lat0: float,
+    lon0: float,
+    a_m: float,
+    b_m: float,
+    wind_dir_deg: float,
+    n_points: int = 120,
+) -> List[Tuple[float, float]]:
+    """
+    物理モデルの楕円 (a,b, 風向) を地理座標のポリゴン(緯度経度列)に変換
+    - X軸: 東, Y軸: 北
+    - 風向: 0°=北, 90°=東（入力と同じルール）
+    """
+    t = np.linspace(0, 2 * np.pi, n_points)
+    x = a_m * np.cos(t)
+    y = b_m * np.sin(t)
+
+    theta = math.radians(90.0 - wind_dir_deg)  # 北を+Y, 東を+X として回転
+    rot = np.array([[math.cos(theta), -math.sin(theta)],
+                    [math.sin(theta),  math.cos(theta)]])
+    xy = rot @ np.vstack([x, y])  # shape (2, n)
+
+    poly = []
+    for dx, dy in zip(xy[0], xy[1]):
+        lat, lon = meters_to_latlon(lat0, lon0, dx, dy)
+        poly.append((lat, lon))
+    return poly
+
 # ------------------------------ UI ユーティリティ ------------------------------
 def metric_block(col, label: str, value: float, unit: str, precision: int = 2):
     col.metric(label, f"{value:,.{precision}f} {unit}")
@@ -487,7 +527,7 @@ def to_json(outputs: Outputs) -> str:
 
 # ------------------------------ セッション初期化 ------------------------------
 if "origin_lat" not in st.session_state:
-    st.session_state["origin_lat"] = 35.681236
+    st.session_state["origin_lat"] = 35.681236  # 東京駅付近
 if "origin_lon" not in st.session_state:
     st.session_state["origin_lon"] = 139.767125
 if "weather_info" not in st.session_state:
@@ -691,9 +731,9 @@ st.info(
     icon="ℹ️",
 )
 
-# ------------------------------ タブ: 図/JSON/感度 ------------------------------
-tab_fig, tab_json, tab_sensitivity, tab_help = st.tabs(
-    ["📈 可視化", "🧾 JSON/エクスポート", "🧪 感度分析", "❓ ヘルプ"]
+# ------------------------------ タブ: 図/JSON/アニメ/感度/ヘルプ ------------------------------
+tab_fig, tab_json, tab_anim, tab_sensitivity, tab_help = st.tabs(
+    ["📈 可視化", "🧾 JSON/エクスポート", "🌏 延焼アニメーション", "🧪 感度分析", "❓ ヘルプ"]
 )
 
 physical_for_plots = run_physical_model(inputs)
@@ -783,6 +823,98 @@ with tab_json:
         mime="text/csv",
     )
 
+with tab_anim:
+    st.subheader("延焼アニメーション（地図上で時間経過を確認）")
+
+    if not HAS_FOLIUM:
+        st.warning(
+            "延焼アニメーションを表示するには `streamlit-folium` が必要です。\n"
+            "requirements.txt に `streamlit-folium` を追加してください。",
+            icon="ℹ️",
+        )
+    else:
+        # 時間スライダーで楕円を更新（疑似アニメーション）
+        max_t = max(5.0, float(inputs.duration_min))
+        step_t = max(1.0, max_t / 20.0)
+        t_sel = st.slider(
+            "経過時間[min]",
+            0.0,
+            max_t,
+            min(max_t / 4.0, max_t),
+            step=step_t,
+        )
+
+        # t=0 のときは初期半径のみ
+        if t_sel <= 0.0:
+            tmp_inputs = Inputs(
+                duration_min=0.0,
+                wind_speed_ms=inputs.wind_speed_ms,
+                wind_dir_deg=inputs.wind_dir_deg,
+                rel_humidity=inputs.rel_humidity,
+                air_temp_c=inputs.air_temp_c,
+                slope_percent=inputs.slope_percent,
+                fuel_class=inputs.fuel_class,
+                init_radius_m=inputs.init_radius_m,
+                attack_duration_min=inputs.attack_duration_min,
+                app_rate_lpm_per_m=inputs.app_rate_lpm_per_m,
+                efficiency=inputs.efficiency,
+            )
+        else:
+            tmp_inputs = Inputs(
+                duration_min=float(t_sel),
+                wind_speed_ms=inputs.wind_speed_ms,
+                wind_dir_deg=inputs.wind_dir_deg,
+                rel_humidity=inputs.rel_humidity,
+                air_temp_c=inputs.air_temp_c,
+                slope_percent=inputs.slope_percent,
+                fuel_class=inputs.fuel_class,
+                init_radius_m=inputs.init_radius_m,
+                attack_duration_min=inputs.attack_duration_min,
+                app_rate_lpm_per_m=inputs.app_rate_lpm_per_m,
+                efficiency=inputs.efficiency,
+            )
+
+        o_t = run_physical_model(tmp_inputs)
+
+        st.caption(
+            f"経過時間: {t_sel:.1f} 分 / "
+            f"等価半径: {o_t.radius_m:.1f} m / "
+            f"延焼面積: {o_t.area_sqm:.0f} m²"
+        )
+
+        lat0, lon0 = origin_tuple
+        poly_latlon = ellipse_polygon_latlon(
+            lat0, lon0,
+            o_t.ellipse_a_m,
+            o_t.ellipse_b_m,
+            inputs.wind_dir_deg,
+            n_points=180,
+        )
+
+        m_anim = folium.Map(
+            location=[lat0, lon0],
+            zoom_start=12,
+            tiles="OpenStreetMap",
+        )
+
+        # 発生源マーカー
+        folium.Marker(
+            location=[lat0, lon0],
+            popup="発生源",
+            icon=folium.Icon(color="red", icon="fire"),
+        ).add_to(m_anim)
+
+        # 延焼楕円ポリゴン
+        folium.Polygon(
+            locations=poly_latlon,
+            color="orange",
+            fill=True,
+            fill_opacity=0.35,
+            popup=f"{t_sel:.1f} 分後の推定延焼範囲",
+        ).add_to(m_anim)
+
+        st_folium(m_anim, width=800, height=500, returned_objects=[])
+
 with tab_sensitivity:
     st.subheader("感度分析 (シナリオ比較 / 物理モデル)")
     st.caption("任意の軸を変更して、半径・水量の変化を高速に比較")
@@ -844,9 +976,14 @@ with tab_help:
   - 3つの結果を重み付き平均して、最終的な推奨値を決定
   - 発生源位置と OpenWeather の気象情報を解析コンテキストに含める
 
+- **延焼アニメーション**
+  - 発生源を中心とした楕円形の延焼範囲を、時間スライダーに応じて地図上に描画
+  - 小規模エリアとみなし、平面近似で[m]→緯度経度に変換
+  - 実際の地形・風場とは異なる可能性があるため、現場判断の補助程度に利用してください。
+
 - **高速性の確保**
   - Gemini 呼び出しは主要出力の1回のみ（3ロールを並列実行）
-  - グラフや感度分析は物理モデルで計算し、インタラクティブ操作でも高速に応答
+  - グラフや感度分析、アニメーションの楕円計算は物理モデルで行い、高速に応答
         """
     )
 
