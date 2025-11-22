@@ -15,8 +15,9 @@ Fire Spread Simulator Pro (Streamlit + Gemini 2.5 Flash Ensemble)
 ■ 起動
 streamlit run app.py
 
-■ secrets.toml に以下を設定
-GEMINI_API_KEY = "あなたのAPIキー"
+■ .streamlit/secrets.toml に以下のような構造で API を定義しておくこと：
+[general]
+api_key = "（ここにGoogle API Key）"
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ h3, h4 { margin-top: 0.6rem; }
 /* 小さなヘルプテキスト */
 .small { font-size: 0.92rem; opacity: 0.8; }
 /* ダウンロードボタンの幅 */
-button[kind="secondary"] { min-width: 200px; }
+button[kind="secondary"] { min_width: 200px; }
 """
 st.markdown(f"<style>{CUSTOM_CSS}</style>", unsafe_allow_html=True)
 
@@ -174,14 +175,23 @@ def run_physical_model(inp: Inputs) -> Outputs:
 
 # ------------------------------ Gemini 2.5 Flash 設定 ------------------------------
 def get_gemini_model() -> Optional[genai.GenerativeModel]:
-    api_key = st.secrets.get("GEMINI_API_KEY")
-    if not api_key:
-        st.warning("GEMINI_API_KEY が設定されていないため、Gemini 解析は無効です（物理モデルのみ）。")
-        return None
+    """
+    secrets.toml の [general].api_key を利用して Gemini を初期化する。
+    [general]
+    api_key = "YOUR_GOOGLE_API_KEY"
+    """
     try:
+        # ユーザーの secrets.toml 構造に合わせる
+        api_key = st.secrets["general"]["api_key"]
+
+        if not api_key:
+            st.warning("general.api_key が設定されていないため、Gemini 解析は無効です。", icon="⚠️")
+            return None
+
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel("gemini-2.5-flash")
         return model
+
     except Exception as e:
         st.error(f"Gemini モデル初期化でエラーが発生しました: {e}")
         return None
