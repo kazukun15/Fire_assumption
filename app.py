@@ -8,7 +8,8 @@ Fire Spread Simulator Pro (Streamlit + Gemini 2.5 Flash Ensemble)
 - OpenWeather の気象情報を取得して解析に反映
 - 発生源からの延焼を、地図上で時間スライダー & 自動再生アニメーションで表示
 - 予測時間は「分・時間・日」の単位で指定可能（内部では分に換算）
-- Gemini の数値結果を、人が読みやすい日本語で要約・比較するタブを追加
+- Gemini の数値結果を「世界一の消防士・災害スペシャリスト」として
+  現状評価・延焼可能性・消火アドバイスの形で解説
 
 ■ 必要ライブラリ
 - streamlit
@@ -322,10 +323,11 @@ def build_gemini_prompt(
         wstr = "外部気象データ: 未取得（入力された値のみで評価）"
 
     return f"""
-あなたは火災拡大シミュレーションの専門家です。
+あなたは世界一の消防士であり、災害対応のスペシャリストです。
 あなたの視点: {role_desc}
 
-以下の条件で、火災の拡大と必要水量を評価してください。
+以下の条件で、火災の拡大と必要水量を評価し、
+「現在の状況」「延焼の可能性」「消火・対応のポイント」を数値ベースで判断してください。
 
 [発生源位置]
 - {origin_str}
@@ -357,7 +359,7 @@ def build_gemini_prompt(
 [タスク]
 - 上記の物理モデル結果をベースラインとし、あなたの専門的判断により、
   安全率や不確実性、燃料・気象条件を考慮して、**最大 ±30% の範囲**で補正した推定値を出してください。
-- あなたのロールに応じて、以下の傾向を持たせてください:
+- ロールごとの考え方:
   - 安全マージン重視: radius, area, water_volume をやや大きめに（+10〜+30%）補正しやすくする。
   - 資機材効率重視: water_volume をやや小さめに（-10〜-25%）補正しつつ、安全上必要な最低限を維持。
   - バランス型: 物理モデル付近（±15% 程度）に収まるように調整。
@@ -748,7 +750,7 @@ with left_loc:
         st.caption("地図をクリックすると、その地点を発生源として設定できます。")
         m = folium.Map(
             location=[cur_lat, cur_lon],
-            zoom_start=10,
+            zoom_start=16,  # 近めのスケール
             tiles="OpenStreetMap",
         )
         folium.Marker(
@@ -984,7 +986,7 @@ with tab_anim:
 
             m_anim = folium.Map(
                 location=[lat0, lon0],
-                zoom_start=12,
+                zoom_start=16,  # 近めのスケール
                 tiles="OpenStreetMap",
             )
             folium.Marker(
@@ -1012,7 +1014,7 @@ with tab_anim:
             if st.button("▶️ 再生（0 〜 最大時間まで）"):
                 # 0 から max_t までアニメーション
                 for t_cur in np.arange(0.0, max_t + step_t, step_t):
-                    # ここで session_state["anim_t_sel"] は書き換えない
+                    # session_state["anim_t_sel"] は書き換えない（エラー回避）
                     render_frame(float(t_cur))
                     time.sleep(0.3)  # 再生速度
 
@@ -1097,33 +1099,15 @@ with tab_sens:
     axS.set_title("パラメータ変更時の半径と必要水量")
     st.pyplot(figS)
 
-# ---- Gemini解析の解説 ----
+# ---- Gemini解析の解説（消防士トーンでの現状評価・延焼・消火アドバイス） ----
 with tab_explain:
-    st.markdown("#### Gemini による解析結果の言語化")
+    st.markdown("#### Gemini による状況評価と現場アドバイス")
 
     if ensemble_meta["mode"] != "gemini_ensemble":
         st.warning("Gemini が無効なため、物理モデルのみで計算しています。Gemini の解説は表示できません。")
     else:
         phys = ensemble_meta["physical"]
         details = ensemble_meta["ensemble_details"]
-
-        st.markdown("##### 1. 物理モデルと最終アンサンブルの比較")
-
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.markdown("**物理モデル（基準値）**")
-            st.write(
-                f"- 等価半径: {phys['radius_m']:.1f} m\n"
-                f"- 延焼面積: {phys['area_sqm']:.0f} m²\n"
-                f"- 必要水量: {phys['water_volume_tons']:.1f} ton"
-            )
-        with col_b:
-            st.markdown("**Gemini アンサンブル（最終値）**")
-            st.write(
-                f"- 等価半径: {outputs.radius_m:.1f} m\n"
-                f"- 延焼面積: {outputs.area_sqm:.0f} m²\n"
-                f"- 必要水量: {outputs.water_volume_tons:.1f} ton"
-            )
 
         d_r = pct_diff(outputs.radius_m, phys["radius_m"])
         d_a = pct_diff(outputs.area_sqm, phys["area_sqm"])
@@ -1132,18 +1116,99 @@ with tab_explain:
         def sign_fmt(x: float) -> str:
             return f"{x:+.1f}%"
 
-        st.markdown("**調整のイメージ**")
+        # --- 1. 現在の状況（数値を消防士目線で要約） ---
+        st.markdown("##### 1. 現在の状況（延焼規模のイメージ）")
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.markdown("**物理モデル（純粋な計算値）**")
+            st.write(
+                f"- 等価半径（計算上の広がり）: {phys['radius_m']:.1f} m\n"
+                f"- 延焼面積: {phys['area_sqm']:.0f} m²\n"
+                f"- 必要水量（計算上）: {phys['water_volume_tons']:.1f} ton"
+            )
+        with col_b:
+            st.markdown("**Gemini アンサンブル（現場を意識した見立て）**")
+            st.write(
+                f"- 等価半径（警戒すべき広がり）: {outputs.radius_m:.1f} m\n"
+                f"- 延焼面積（想定被害範囲）: {outputs.area_sqm:.0f} m²\n"
+                f"- 必要水量（準備したい総量）: {outputs.water_volume_tons:.1f} ton"
+            )
+
+        st.markdown("**計算値からの補正の方向**")
         st.write(
-            f"- 等価半径: 物理モデル比 {sign_fmt(d_r)} の補正\n"
-            f"- 延焼面積: 物理モデル比 {sign_fmt(d_a)} の補正\n"
-            f"- 必要水量: 物理モデル比 {sign_fmt(d_w)} の補正"
+            f"- 半径: 物理モデル比 {sign_fmt(d_r)}\n"
+            f"- 面積: 物理モデル比 {sign_fmt(d_a)}\n"
+            f"- 水量: 物理モデル比 {sign_fmt(d_w)}"
+        )
+        st.caption(
+            "※プラス側なら『余裕を持って広め・多めに見ている』、マイナス側なら『資機材制約を意識して絞っている』というイメージです。"
+        )
+
+        # --- 2. 延焼の可能性（どこまで広がりうるかの目安） ---
+        st.markdown("##### 2. 延焼の可能性（どこまで広がりうるか）")
+
+        # 単純な目安レベル分け（消防士の「感覚的コメント」用）
+        level_text = ""
+        if outputs.radius_m < 100:
+            level_text = "建物火災〜小規模な林野火災レベルで、エリアとしては比較的コンパクトです。"
+        elif outputs.radius_m < 500:
+            level_text = "面的な延焼が見込まれる中規模火災で、周辺の建物・林地への波及を強く意識するレベルです。"
+        else:
+            level_text = "大規模な延焼ポテンシャルを持つ火災です。面としての延焼に加え、飛び火・スポット火災も強く警戒が必要な規模です。"
+
+        st.write(
+            f"- 想定される延焼半径: 約 **{outputs.radius_m:.0f} m**\n"
+            f"- 想定される延焼面積: 約 **{outputs.area_sqm/10_000:.1f} ha**（ヘクタール換算）\n\n"
+            f"{level_text}"
         )
 
         st.caption(
-            "※プラス方向なら「安全マージン多め」、マイナス方向なら「資機材効率寄り」の傾向です。"
+            "※実際には地形・道路・防火帯・建物配置によって延焼パターンは大きく変わります。"
+            "ここでは『素の燃え広がり方』の目安として捉えてください。"
         )
 
-        st.markdown("##### 2. 各ロールごとの考え方")
+        # --- 3. 消火・対応のポイント（数値から読み取れる戦略） ---
+        st.markdown("##### 3. 消火・対応のポイント（水量・時間からの作戦イメージ）")
+
+        # ざっくりしたポンプ台数目安（1台 2,400 L/min = 2.4 ton/min 相当と仮定）
+        # 実務とは異なるが、「どのくらいのポンプが必要そうか」の感覚用
+        if inputs.attack_duration_min > 0:
+            ton_per_min_per_pump = 2.4  # 仮定
+            total_min = inputs.attack_duration_min
+            if total_min <= 0:
+                total_min = 1.0
+            est_pumps = outputs.water_volume_tons / (ton_per_min_per_pump * total_min)
+        else:
+            est_pumps = 0.0
+
+        st.write(
+            f"- 必要水量の目安: **約 {outputs.water_volume_tons:.1f} ton**\n"
+            f"- 初期攻勢時間: 約 **{inputs.attack_duration_min:.0f} 分** を想定\n"
+            f"- 仮に1台あたり毎分約 2.4 ton 出せるポンプとすると、\n"
+            f"  → 必要ポンプ台数のざっくり目安: **{est_pumps:.1f} 台分の能力**"
+        )
+
+        st.markdown("**現場対応の考え方（定性的なアドバイス）**")
+        st.markdown(
+            """
+- **現在の状況**
+  - このモデルでは、燃料・風・斜面・湿度から「どの程度の広さまで燃え広がりうるか」を数値化しています。
+  - 等価半径と面積は「警戒すべき範囲」の目安、水量は「最低限このくらいは確保しておきたい」というラインです。
+
+- **延焼の可能性**
+  - 風下側の楕円が長くなるほど、火頭の移動スピードと到達範囲が大きくなります。
+  - 風速が高い・斜面が上り・燃料が重い（森林など）場合は、同じ半径でも火勢が強く、人員の安全距離を広めに取る必要があります。
+
+- **消火・対応のポイント**
+  - 数値上の必要水量が大きい場合は、「全面制圧」ではなく、**延焼先行区のカットライン確保** や **重要施設の防御** を優先する判断が重要です。
+  - 逆に、必要水量が小さめに出ている場合でも、風向・風速が変わりやすい条件では、**退路の確保** と **水利の二重化** を意識しておくと安全です。
+  - いずれの場合も、この結果は「机上の最低ライン」であり、実際の現場では **安全側に上乗せした水量確保と人員配置** を強く推奨します。
+            """
+        )
+
+        # --- 4. 各ロールの違い（簡潔に） ---
+        st.markdown("##### 4. 各ロールごとの見立ての違い")
 
         for role in details:
             role_id = role["role_id"]
@@ -1154,46 +1219,25 @@ with tab_explain:
 
             if role_id == "balanced":
                 title = "バランス型（balanced）"
-                desc = "物理モデルを基準にしつつ、大きくも小さくも振れすぎないように調整しています。"
+                desc = "安全と資機材効率のバランスを取り、現実的な数字に落とし込んだ見立てです。"
             elif role_id == "safety":
                 title = "安全マージン重視（safety）"
-                desc = "住民・隊員の安全を優先し、やや大きめに見積もる傾向があります。"
+                desc = "『万が一』に備えて広め・多めに見積もった、慎重側の見立てです。"
             else:
                 title = "資機材効率重視（resource）"
-                desc = "限られた水・車両を前提に、必要量をやや抑え気味に見積もる傾向があります。"
+                desc = "水利や車両数に制約がある状況を想定し、効率を重視した見立てです。"
 
-            with st.expander(f"{title} の結果と解説", expanded=(role_id == "balanced")):
+            with st.expander(f"{title} の結果とニュアンス", expanded=(role_id == "balanced")):
                 st.markdown(desc)
                 st.write(
-                    f"- 等価半径: {data['radius_m']:.1f} m "
-                    f"(物理比 {sign_fmt(r)})\n"
-                    f"- 延焼面積: {data['area_sqm']:.0f} m² "
-                    f"(物理比 {sign_fmt(a_)})\n"
-                    f"- 必要水量: {data['water_volume_tons']:.1f} ton "
-                    f"(物理比 {sign_fmt(w_)})"
+                    f"- 半径: {data['radius_m']:.1f} m（物理比 {sign_fmt(r)}）\n"
+                    f"- 面積: {data['area_sqm']:.0f} m²（物理比 {sign_fmt(a_)}）\n"
+                    f"- 水量: {data['water_volume_tons']:.1f} ton（物理比 {sign_fmt(w_)}）"
                 )
-
                 st.caption(
-                    "※「物理比」がプラスなら物理モデルより安全側、マイナスなら効率側に寄った判断です。"
+                    "現場では、safety を『最悪を見たシナリオ』、resource を『資源制約が厳しいときのシナリオ』として、"
+                    "balanced や最終アンサンブル値と合わせて見ると方針を立てやすくなります。"
                 )
-
-        st.markdown("##### 3. 現場での読み取り方（目安）")
-        st.markdown(
-            """
-- **等価半径が物理モデルより+10〜30%程度なら**  
-  → 「地形・風の変動などを見込んで、少し広めに危険範囲を見ておいた方がよい」という判断。
-
-- **必要水量が物理モデルより-10〜20%程度なら**  
-  → 「水利・ポンプ台数を考えると、このくらいなら現実的範囲」という効率寄りの見積もり。
-
-- **最終アンサンブル値は**  
-  - 安全型と効率型の中間を取りつつ、  
-  - 物理モデルから大きく離れない範囲（±30%以内）に抑えた「折衷案」です。
-
-このタブを見れば、「なぜこの数字になっているか」「安全寄りか効率寄りか」を
-直感的に把握できるようにしています。
-            """
-        )
 
 # ---- 詳細情報・ヘルプ ----
 with tab_detail:
