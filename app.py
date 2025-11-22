@@ -4,7 +4,7 @@ Fire Spread Simulator Pro (Streamlit + Gemini 2.5 Flash Ensemble)
 ----------------------------------------------------------------
 - 物理モデル + Gemini 2.5 Flash を組み合わせたハイブリッド火災拡大シミュレーション
 - Gemini を複数視点で並列実行し、重み付きアンサンブルで総合判断
-- 地図上クリック または 住所検索で発生源を指定
+- 地図上クリック / 住所検索 / 緯度経度で発生源を指定
 - 指定地点の気象情報(OpenWeather)を取得し、より詳細な解析に反映
 - UI は世界標準的なダッシュボード構成
 
@@ -45,8 +45,14 @@ import matplotlib
 import requests
 import urllib.parse
 import folium
-from streamlit_folium import st_folium
 import google.generativeai as genai
+
+# ---- streamlit_folium の安全なインポート（ここが修正ポイント）----
+try:
+    from streamlit_folium import st_folium
+    HAS_FOLIUM = True
+except ImportError:
+    HAS_FOLIUM = False
 
 # ------------------------- ページ設定 / グローバル -------------------------
 st.set_page_config(
@@ -57,26 +63,18 @@ st.set_page_config(
 )
 
 # ---- 日本語フォント設定（グラフ文字化け対策） ----
-# IPAexGothic 等が環境に入っていれば日本語が綺麗に表示されます。
-# 未インストールの場合は matplotlib のデフォルトにフォールバックします。
 try:
     matplotlib.rcParams["font.family"] = "IPAexGothic"
 except Exception:
-    # 失敗時はデフォルトフォントのまま
     pass
 matplotlib.rcParams["axes.unicode_minus"] = False
 
-# ---- 軽いCSSで可読性向上（ダーク/ライト両対応） ----
+# ---- 軽いCSSで可読性向上 ----
 CUSTOM_CSS = """
-/* タイトルの余白最適化 */
 .block-container {padding-top: 1.2rem; padding-bottom: 2rem;}
-/* メトリクスの文字強調 */
 div[data-testid="stMetric"] > div {white-space: nowrap;}
-/* サブヘッダ視認性 */
 h3, h4 { margin-top: 0.6rem; }
-/* 小さなヘルプテキスト */
 .small { font-size: 0.92rem; opacity: 0.8; }
-/* ダウンロードボタンの幅 */
 button[kind="secondary"] { min-width: 200px; }
 """
 st.markdown(f"<style>{CUSTOM_CSS}</style>", unsafe_allow_html=True)
@@ -84,49 +82,39 @@ st.markdown(f"<style>{CUSTOM_CSS}</style>", unsafe_allow_html=True)
 # ------------------------------ ドメインモデル ------------------------------
 @dataclass
 class Inputs:
-    duration_min: float      # 予測時間 [min]
-    wind_speed_ms: float     # 風速 [m/s]
-    wind_dir_deg: float      # 風向 [deg, 0=北, 90=東]
-    rel_humidity: float      # 相対湿度 [%]
-    air_temp_c: float        # 気温 [°C]
-    slope_percent: float     # 斜面勾配 [%]
-    fuel_class: str          # 燃料種: grass/shrub/timber
-    init_radius_m: float     # 初期半径 [m]
-    attack_duration_min: float  # 初期攻勢継続 [min]
-    app_rate_lpm_per_m: float   # 散水比率 [L/min/m]
-    efficiency: float           # 散水効率 [0-1]
+    duration_min: float
+    wind_speed_ms: float
+    wind_dir_deg: float
+    rel_humidity: float
+    air_temp_c: float
+    slope_percent: float
+    fuel_class: str
+    init_radius_m: float
+    attack_duration_min: float
+    app_rate_lpm_per_m: float
+    efficiency: float
 
 @dataclass
 class Outputs:
     radius_m: float
     area_sqm: float
     water_volume_tons: float
-    ellipse_a_m: float      # 風下方向の半径(長軸)
-    ellipse_b_m: float      # 横方向の半径(短軸)
+    ellipse_a_m: float
+    ellipse_b_m: float
     perimeter_m: float
 
 # ------------------------------ 物理モデル用パラメータ ------------------------------
 BASE_RATE_BY_FUEL = {
-    # 基準: 無風・無斜面・RH=30% でのベース延焼速度 [m/min]
-    "grass": 8.0,    # 草地は速い
-    "shrub": 3.0,    # 低木
-    "timber": 0.6,   # 立木/森林は遅い
+    "grass": 8.0,
+    "shrub": 3.0,
+    "timber": 0.6,
 }
-
-# 湿度係数: RHが高いほど抑制。RH=30%で1.0、上昇で減衰、低下で増加
 HUMIDITY_K = 1.1
-
-# 風係数: U[m/s] に対して (1 + aU + bU^2)
 WIND_A = 0.10
 WIND_B = 0.010
-
-# 斜面係数: 1 + k * tan(theta), theta ~ atan(slope)
 SLOPE_K = 4.0
-
-# 風による長径/短径比(L/B)の近似: 1 + c*U (上限あり)
 LB_C = 0.30
 LB_MAX = 5.0
-
 EPS = 1e-9
 
 # ------------------------------ 汎用関数 ------------------------------
@@ -135,10 +123,9 @@ def clamp(x: float, lo: float, hi: float) -> float:
 
 # ------------------------------ 物理モデル ------------------------------
 def humidity_factor(rh: float) -> float:
-    # RH=30% →1.0、RH↑で指数減衰、RH↓で増加。極端値はクリップ
     f = math.exp(-HUMIDITY_K * max(0.0, rh - 30.0) / 70.0)
     if rh < 30.0:
-        f = 1.0 + 0.02 * (30.0 - rh)  # 乾燥側の増幅(上限1.6)
+        f = 1.0 + 0.02 * (30.0 - rh)
     return clamp(f, 0.25, 1.6)
 
 def wind_factor(u_ms: float) -> float:
@@ -146,12 +133,12 @@ def wind_factor(u_ms: float) -> float:
     return clamp(f, 1.0, 6.0)
 
 def slope_factor(slope_percent: float) -> float:
-    tan_th = (slope_percent / 100.0)
+    tan_th = slope_percent / 100.0
     f = 1.0 + SLOPE_K * tan_th
     return clamp(f, 1.0, 5.0)
 
 def base_rate(fuel: str) -> float:
-    return BASE_RATE_BY_FUEL.get(fuel, BASE_RATE_BY_FUEL["grass"])  # m/min
+    return BASE_RATE_BY_FUEL.get(fuel, BASE_RATE_BY_FUEL["grass"])
 
 def ros_m_per_min(inp: Inputs) -> float:
     r0 = base_rate(inp.fuel_class)
@@ -164,7 +151,6 @@ def length_breadth_ratio(u_ms: float) -> float:
     return clamp(1.0 + LB_C * u_ms, 1.0, LB_MAX)
 
 def ellipse_axes(ros: float, t_min: float, init_r: float, u_ms: float) -> Tuple[float, float]:
-    """風下方向(長軸A)と横方向(短軸B)の半径[m]を返す。初期半径を加算。"""
     A = ros * t_min + init_r
     lb = length_breadth_ratio(u_ms)
     B = max(EPS, A / lb)
@@ -172,7 +158,6 @@ def ellipse_axes(ros: float, t_min: float, init_r: float, u_ms: float) -> Tuple[
 
 def ellipse_area_perimeter(a: float, b: float) -> Tuple[float, float]:
     area = math.pi * a * b
-    # Ramanujan 近似で周長
     h = ((a - b) ** 2) / ((a + b) ** 2 + EPS)
     perimeter = math.pi * (a + b) * (1 + (3*h)/(10 + math.sqrt(4 - 3*h + EPS)))
     return area, perimeter
@@ -180,7 +165,7 @@ def ellipse_area_perimeter(a: float, b: float) -> Tuple[float, float]:
 def water_requirement_ton(perimeter_m: float, app_rate_lpm_per_m: float, duration_min: float, efficiency: float) -> float:
     liters = app_rate_lpm_per_m * perimeter_m * duration_min
     liters_eff = liters / max(efficiency, 0.05)
-    return liters_eff / 1000.0  # ton
+    return liters_eff / 1000.0
 
 def run_physical_model(inp: Inputs) -> Outputs:
     ros = ros_m_per_min(inp)
@@ -201,7 +186,6 @@ def run_physical_model(inp: Inputs) -> Outputs:
 
 # ------------------------------ 外部API: ジオコーディング & 気象 ------------------------------
 def geocode_address_mapbox(address: str) -> Optional[Tuple[float, float]]:
-    """住所文字列から緯度経度を取得（MapboxのForward Geocoding APIを利用）"""
     try:
         token = st.secrets["mapbox"]["access_token"]
     except Exception:
@@ -211,11 +195,7 @@ def geocode_address_mapbox(address: str) -> Optional[Tuple[float, float]]:
     try:
         q = urllib.parse.quote(address)
         url = f"https://api.mapbox.com/geocoding/v5/mapbox.places/{q}.json"
-        params = {
-            "access_token": token,
-            "limit": 1,
-            "language": "ja",
-        }
+        params = {"access_token": token, "limit": 1, "language": "ja"}
         r = requests.get(url, params=params, timeout=10)
         r.raise_for_status()
         data = r.json()
@@ -223,7 +203,7 @@ def geocode_address_mapbox(address: str) -> Optional[Tuple[float, float]]:
         if not features:
             st.warning("住所から位置を特定できませんでした。")
             return None
-        coords = features[0]["center"]  # [lon, lat]
+        coords = features[0]["center"]
         lon, lat = coords[0], coords[1]
         return lat, lon
     except Exception as e:
@@ -231,7 +211,6 @@ def geocode_address_mapbox(address: str) -> Optional[Tuple[float, float]]:
         return None
 
 def fetch_openweather(lat: float, lon: float) -> Optional[Dict[str, float]]:
-    """指定座標の現在気象情報を OpenWeather から取得（気温・湿度・風速）"""
     try:
         api_key = st.secrets["openweather"]["api_key"]
     except Exception:
@@ -266,11 +245,6 @@ def fetch_openweather(lat: float, lon: float) -> Optional[Dict[str, float]]:
 
 # ------------------------------ Gemini 2.5 Flash 設定 ------------------------------
 def get_gemini_model() -> Optional[genai.GenerativeModel]:
-    """
-    secrets.toml の [general].api_key を利用して Gemini を初期化する。
-    [general]
-    api_key = "YOUR_GOOGLE_API_KEY"
-    """
     try:
         api_key = st.secrets["general"]["api_key"]
         if not api_key:
@@ -290,10 +264,6 @@ def build_gemini_prompt(
     origin: Optional[Tuple[float, float]],
     weather: Optional[Dict[str, float]],
 ) -> str:
-    """
-    各ロール（安全重視・資機材重視・バランス）のためのプロンプト。
-    物理モデル結果 + 発生源位置 + 気象情報を統合して解析。
-    """
     if origin is not None:
         lat, lon = origin
         origin_str = f"緯度 {lat:.5f}, 経度 {lon:.5f}"
@@ -366,15 +336,12 @@ JSON:
 """.strip()
 
 def _extract_json(text: str) -> str:
-    """Gemini からの応答から JSON 部分だけを抽出するユーティリティ。"""
     text = text.strip()
-    # ```json ... ``` 対応
     if text.startswith("```"):
         text = "\n".join(
             line for line in text.splitlines()
             if not line.strip().startswith("```")
         ).strip()
-    # 先頭の { から最後の } まで
     if "{" in text and "}" in text:
         start = text.find("{")
         end = text.rfind("}") + 1
@@ -391,7 +358,6 @@ def call_gemini_variant(
     origin: Optional[Tuple[float, float]],
     weather: Optional[Dict[str, float]],
 ) -> Dict:
-    """各ロールの Gemini 呼び出し。失敗時は物理モデルをそのまま返す。"""
     prompt = build_gemini_prompt(inputs, physical, role_desc, origin, weather)
     try:
         response = model.generate_content(
@@ -400,7 +366,6 @@ def call_gemini_variant(
         )
         text = _extract_json(response.text or "")
         data = json.loads(text)
-        # 必須キーが揃っているか軽くチェック
         for key in [
             "radius_m",
             "area_sqm",
@@ -418,7 +383,6 @@ def call_gemini_variant(
             "data": data,
         }
     except Exception as e:
-        # フォールバック: 物理モデル値を返す
         return {
             "role_id": role_id,
             "ok": False,
@@ -439,26 +403,19 @@ def run_gemini_ensemble(
     origin: Optional[Tuple[float, float]],
     weather: Optional[Dict[str, float]],
 ) -> Tuple[Outputs, Dict]:
-    """
-    物理モデル + Gemini アンサンブルによる総合出力。
-    - 物理モデル: ベースライン
-    - Gemini: 安全重視 / 資機材効率重視 / バランス型 の3ロール
-    - 並列実行 + 重み付き平均で最終値を決定
-    - 発生源位置 & 気象情報を解析コンテキストに含める
-    """
     physical = run_physical_model(inputs)
     model = get_gemini_model()
     if model is None:
-        # Gemini 利用不可の場合は物理モデルのみ
         meta = {
             "mode": "physical_only",
             "physical": physical.__dict__,
             "ensemble_details": [],
+            "origin": origin,
+            "weather": weather,
         }
         return physical, meta
 
     roles = [
-        # role_id, 説明, temperature, weight
         ("balanced", "総合バランス型", 0.4, 0.5),
         ("safety", "安全マージン重視", 0.3, 0.3),
         ("resource", "資機材効率重視", 0.2, 0.2),
@@ -484,7 +441,6 @@ def run_gemini_ensemble(
         for fut in as_completed(futures):
             results.append(fut.result())
 
-    # 重み付き平均
     def aggregate_field(field: str) -> float:
         num = 0.0
         den = 0.0
@@ -529,9 +485,8 @@ def to_json(outputs: Outputs) -> str:
     }
     return json.dumps(payload, ensure_ascii=False)
 
-# ------------------------------ セッション初期化（発生源位置・気象） ------------------------------
+# ------------------------------ セッション初期化 ------------------------------
 if "origin_lat" not in st.session_state:
-    # デフォルトは東京付近
     st.session_state["origin_lat"] = 35.681236
 if "origin_lon" not in st.session_state:
     st.session_state["origin_lon"] = 139.767125
@@ -562,7 +517,7 @@ with st.sidebar:
             100.0,
             10.0,
             1.0,
-            help="上り勾配で延焼は加速します。% = 垂直/水平×100",
+            help="上り勾配で延焼は加速します。",
         )
         init_radius_m = st.number_input("初期半径[m]", 0.0, 200.0, 5.0, step=1.0)
     with c2:
@@ -581,7 +536,7 @@ with st.sidebar:
             50.0,
             float(default_app_rate),
             step=0.1,
-            help="単位延長1mあたり1分間に必要な散水量の目安。燃料が重いほど大きく。",
+            help="単位延長1mあたり1分の散水量。",
         )
     with c4:
         attack_duration_min = st.number_input(
@@ -599,10 +554,9 @@ with st.sidebar:
             1.00,
             0.60,
             0.05,
-            help="散水の実効率(損失を考慮)。低いほど必要量は増えます。",
+            help="散水の実効率。低いほど必要量は増えます。",
         )
 
-    # 入力構造体
     inputs = Inputs(
         duration_min=duration_min,
         wind_speed_ms=wind_speed_ms,
@@ -617,20 +571,23 @@ with st.sidebar:
         efficiency=float(efficiency),
     )
 
-# ------------------------------ 発生源位置と気象情報 UI ------------------------------
+# ------------------------------ 発生源 & 気象 ------------------------------
 st.subheader("発生源の指定と外部データ連携")
 
 left_loc, right_loc = st.columns([1.3, 1])
 
 with left_loc:
+    method_options = ["住所から検索", "緯度経度を直接入力"]
+    if HAS_FOLIUM:
+        method_options.insert(0, "地図上で指定")
+
     method = st.radio(
         "発生源の指定方法",
-        ["地図上で指定", "住所から検索", "緯度経度を直接入力"],
+        method_options,
         index=0,
         horizontal=True,
     )
 
-    # 現在の値
     cur_lat = st.session_state["origin_lat"]
     cur_lon = st.session_state["origin_lon"]
 
@@ -653,14 +610,13 @@ with left_loc:
             else:
                 st.warning("住所を入力してください。")
 
-    else:  # 地図上で指定
+    else:  # 地図上で指定（HAS_FOLIUM が True の場合のみここに来る）
         st.caption("地図をクリックすると、その地点を発生源として設定できます。")
         m = folium.Map(
             location=[cur_lat, cur_lon],
             zoom_start=10,
             tiles="OpenStreetMap",
         )
-        # 現在の発生源をマーカー表示
         folium.Marker(
             location=[cur_lat, cur_lon],
             popup="現在の発生源",
@@ -674,6 +630,13 @@ with left_loc:
             st.session_state["origin_lat"] = lat
             st.session_state["origin_lon"] = lon
             st.info(f"クリックした地点を発生源に設定: 緯度 {lat:.5f}, 経度 {lon:.5f}")
+
+    if not HAS_FOLIUM:
+        st.warning(
+            "地図上で指定するには `streamlit-folium` が必要です。\n"
+            "requirements.txt に `streamlit-folium` を追加してください。",
+            icon="ℹ️",
+        )
 
 with right_loc:
     st.markdown("**現在の発生源**")
@@ -700,7 +663,6 @@ with right_loc:
         )
         st.caption("※必要に応じてサイドバーの風速・湿度・気温を手動で合わせてください。")
 
-# origin / weather をまとめておく
 origin_tuple: Optional[Tuple[float, float]] = (
     st.session_state["origin_lat"],
     st.session_state["origin_lon"],
@@ -709,7 +671,7 @@ weather_ctx: Optional[Dict[str, float]] = st.session_state["weather_info"]
 
 st.divider()
 
-# ------------------------------ 主要出力エリア（Geminiアンサンブル） ------------------------------
+# ------------------------------ 主要出力エリア ------------------------------
 outputs, ensemble_meta = run_gemini_ensemble(inputs, origin_tuple, weather_ctx)
 
 m1, m2, m3, m4 = st.columns(4)
@@ -734,7 +696,6 @@ tab_fig, tab_json, tab_sensitivity, tab_help = st.tabs(
     ["📈 可視化", "🧾 JSON/エクスポート", "🧪 感度分析", "❓ ヘルプ"]
 )
 
-# グラフや感度分析は「高速性」を優先して物理モデルで描画
 physical_for_plots = run_physical_model(inputs)
 
 with tab_fig:
@@ -745,12 +706,11 @@ with tab_fig:
     t = np.linspace(0, 2 * np.pi, 400)
     x = a * np.cos(t)
     y = b * np.sin(t)
-    # 風向に合わせて回転(0°=北→y+)。北を+Y、東を+Xとして回転。
-    theta = np.deg2rad(90 - inputs.wind_dir_deg)
-    rot = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+    theta = math.radians(90 - inputs.wind_dir_deg)
+    rot = np.array([[math.cos(theta), -math.sin(theta)], [math.sin(theta), math.cos(theta)]])
     xy = rot @ np.vstack([x, y])
     ax1.plot(xy[0], xy[1], linewidth=2)
-    ax1.scatter([0], [0], marker="*", s=120)  # 火点
+    ax1.scatter([0], [0], marker="*", s=120)
     ax1.set_aspect("equal", "box")
     ax1.set_xlabel("X [m]")
     ax1.set_ylabel("Y [m]")
@@ -846,7 +806,7 @@ with tab_sensitivity:
         for s in slopes:
             label = f"勾配 {s:.0f}%"
             scenarios.append((label, Inputs(**{**inputs.__dict__, "slope_percent": s})))
-    else:  # 燃料種
+    else:
         fuels = ["grass", "shrub", "timber"]
         for f in fuels:
             label = f"燃料 {f}"
