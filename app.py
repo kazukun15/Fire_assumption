@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Fire Spread Simulator Pro Ver.3.0 (Command Center Edition)
+Fire Spread Command Center Ver.3.1 (Bug Fix Edition)
 ----------------------------------------------------------------
-- UI/UX: Cyberpunk/Tactical Dashboard Style
-- Logic: FARSITEベースの数理モデル (維持)
-- AI: Tactical Advisor Integration
+- UI/UX: 災害対策本部・司令塔ダッシュボード (ダークモード)
+- Fix: 気象APIからの異常値（360度など）によるクラッシュを防止
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ import urllib.parse
 import altair as alt
 import google.generativeai as genai
 
-# ---- ライブラリの存在チェック ----
+# ---- 外部ライブラリのチェック ----
 try:
     from streamlit_folium import st_folium
     import folium
@@ -29,7 +28,7 @@ try:
 except ImportError:
     HAS_FOLIUM = False
 
-# ------------------------- ページ設定 (最初に行う必要があります) -------------------------
+# ------------------------- 1. ページ設定 (最優先) -------------------------
 st.set_page_config(
     page_title="FIRE COMMAND CENTER",
     page_icon="🔥",
@@ -37,21 +36,19 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ------------------------- UI UX デザインシステム (CSS Injection) -------------------------
+# ------------------------- 2. デザインシステム (CSS) -------------------------
 def inject_custom_css():
     st.markdown("""
     <style>
-        /* 全体の背景とフォント */
+        /* ベースカラー: 漆黒に近いダークグレー */
         .stApp {
             background-color: #0E1117;
-            font-family: 'Roboto Mono', monospace;
+            font-family: 'Roboto', 'Noto Sans JP', sans-serif;
         }
         
-        /* タイトルまわり */
         h1, h2, h3 {
-            color: #E0E0E0;
-            font-weight: 600;
-            letter-spacing: 0.1em;
+            color: #E6E6E6 !important;
+            letter-spacing: 0.05em;
         }
 
         /* サイドバー */
@@ -60,76 +57,61 @@ def inject_custom_css():
             border-right: 1px solid #30363D;
         }
 
-        /* メトリックカード (HUD風) */
+        /* 数値カード (HUD風) */
         div[data-testid="stMetric"] {
             background-color: #21262D;
             border: 1px solid #30363D;
             padding: 15px;
             border-radius: 8px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-            transition: transform 0.2s;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.5);
+            transition: 0.3s;
         }
         div[data-testid="stMetric"]:hover {
             border-color: #FF5722;
-            transform: translateY(-2px);
         }
         div[data-testid="stMetric"] label {
             color: #8B949E !important;
-            font-size: 0.8rem !important;
         }
         div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
             color: #F0F6FC !important;
-            font-size: 1.8rem !important;
-            font-weight: 700;
-            text-shadow: 0 0 10px rgba(255, 87, 34, 0.3);
+            font-family: 'Courier New', monospace;
+            font-weight: bold;
         }
 
         /* 危険度バッジ */
         .danger-badge {
-            padding: 5px 10px;
+            display: inline-block;
+            padding: 4px 12px;
             border-radius: 4px;
             font-weight: bold;
             color: #fff;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
+            letter-spacing: 0.1em;
+            box-shadow: 0 0 10px rgba(255,0,0,0.3);
         }
-
-        /* タブのスタイル */
-        .stTabs [data-baseweb="tab-list"] {
-            gap: 8px;
-            background-color: #0E1117;
-        }
-        .stTabs [data-baseweb="tab"] {
-            height: 40px;
-            background-color: #21262D;
-            border-radius: 4px;
-            border: 1px solid #30363D;
-            color: #8B949E;
-        }
-        .stTabs [aria-selected="true"] {
-            background-color: #FF5722 !important;
-            color: white !important;
-            border-color: #FF5722 !important;
+        
+        /* AIアドバイスエリア */
+        .ai-console {
+            background-color: #0D1117;
+            border-left: 4px solid #FFC107;
+            padding: 15px;
+            margin-top: 10px;
+            border-radius: 0 4px 4px 0;
+            font-family: 'Courier New', monospace;
+            color: #C9D1D9;
         }
 
         /* ボタン */
         .stButton button {
-            background-color: #238636;
-            color: white;
-            border: none;
+            width: 100%;
+            border-radius: 4px;
             font-weight: bold;
-            transition: all 0.3s;
-        }
-        .stButton button:hover {
-            background-color: #2EA043;
-            box-shadow: 0 0 15px rgba(46, 160, 67, 0.5);
         }
     </style>
     """, unsafe_allow_html=True)
 
 inject_custom_css()
 
-# ------------------------- ドメインモデル & 定数 -------------------------
+# ------------------------- 3. データ構造 & 定数 -------------------------
 @dataclass
 class Inputs:
     duration_min: float
@@ -153,7 +135,7 @@ class Outputs:
     ellipse_b_m: float
     perimeter_m: float
 
-# 定数
+# 燃焼物理パラメータ
 BASE_RATE_BY_FUEL = {"grass": 8.0, "shrub": 3.0, "timber": 0.6}
 HUMIDITY_K = 1.1
 WIND_A = 0.10
@@ -166,8 +148,7 @@ EPS = 1e-9
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
-# ------------------------- 物理モデル (Logic) -------------------------
-# ロジックは信頼性を担保するため、元のコードを維持しています
+# ------------------------- 4. ロジック (物理モデル) -------------------------
 
 def humidity_factor(rh: float, temp_c: float = 25.0) -> float:
     base_f = math.exp(-HUMIDITY_K * max(0.0, rh - 30.0) / 70.0)
@@ -185,11 +166,8 @@ def slope_factor(slope_percent: float) -> float:
     f = 1.0 + SLOPE_K * tan_th
     return clamp(f, 1.0, 6.0)
 
-def base_rate(fuel: str) -> float:
-    return BASE_RATE_BY_FUEL.get(fuel, BASE_RATE_BY_FUEL["grass"])
-
 def ros_m_per_min(inp: Inputs) -> float:
-    r0 = base_rate(inp.fuel_class)
+    r0 = BASE_RATE_BY_FUEL.get(inp.fuel_class, 1.0)
     f_h = humidity_factor(inp.rel_humidity, inp.air_temp_c)
     f_w = wind_factor(inp.wind_speed_ms)
     f_s = slope_factor(inp.slope_percent)
@@ -198,31 +176,25 @@ def ros_m_per_min(inp: Inputs) -> float:
 def length_breadth_ratio(u_ms: float) -> float:
     return clamp(1.0 + LB_C * u_ms, 1.0, LB_MAX)
 
-def ellipse_axes(ros: float, t_min: float, init_r: float, u_ms: float) -> Tuple[float, float]:
-    A = ros * t_min + init_r
-    lb = length_breadth_ratio(u_ms)
-    B = max(EPS, A / lb)
-    return A, B
-
 def ellipse_area_perimeter(a: float, b: float) -> Tuple[float, float]:
     area = math.pi * a * b
     h = ((a - b) ** 2) / ((a + b) ** 2 + EPS)
     perimeter = math.pi * (a + b) * (1 + (3*h)/(10 + math.sqrt(4 - 3*h + EPS)))
     return area, perimeter
 
-def water_requirement_ton(perimeter_m: float, app_rate: float, duration: float, eff: float) -> float:
-    liters = app_rate * perimeter_m * duration
-    liters_eff = liters / max(eff, 0.05)
-    return liters_eff / 1000.0
-
 def run_physical_model(inp: Inputs) -> Outputs:
     ros = ros_m_per_min(inp)
-    A, B = ellipse_axes(ros, inp.duration_min, inp.init_radius_m, inp.wind_speed_ms)
+    lb = length_breadth_ratio(inp.wind_speed_ms)
+    A = ros * inp.duration_min + inp.init_radius_m
+    B = max(EPS, A / lb)
+    
     area, perimeter = ellipse_area_perimeter(A, B)
     r_equiv = math.sqrt(area / math.pi)
-    water_ton = water_requirement_ton(
-        perimeter, inp.app_rate_lpm_per_m, inp.attack_duration_min, inp.efficiency
-    )
+    
+    liters = inp.app_rate_lpm_per_m * perimeter * inp.attack_duration_min
+    liters_eff = liters / max(inp.efficiency, 0.05)
+    water_ton = liters_eff / 1000.0
+    
     return Outputs(r_equiv, area, water_ton, A, B, perimeter)
 
 def run_time_series_simulation(inp: Inputs, steps: int = 20) -> pd.DataFrame:
@@ -235,47 +207,30 @@ def run_time_series_simulation(inp: Inputs, steps: int = 20) -> pd.DataFrame:
         A = ros * t + inp.init_radius_m
         B = max(EPS, A / lb)
         area, perimeter = ellipse_area_perimeter(A, B)
-        r_equiv = math.sqrt(area / math.pi)
         results.append({
-            "time_min": t,
-            "radius_m": r_equiv,
-            "area_sqm": area,
-            "perimeter_m": perimeter
+            "経過時間(分)": t,
+            "延焼面積(m2)": area,
+            "周囲長(m)": perimeter
         })
     return pd.DataFrame(results)
 
 def get_fire_danger_level(temp: float, humid: float, wind: float) -> Tuple[str, str]:
-    # 乾燥指数 (近似)
     index = humid - (temp - 10) * 2.0
     if wind > 10.0: index -= 15
     elif wind > 5.0: index -= 5
     
-    if index < 15: return "EXTREME", "#FF0033"
-    if index < 30: return "VERY HIGH", "#FF6600"
-    if index < 50: return "HIGH", "#FF9900"
-    if index < 70: return "MODERATE", "#FFCC00"
-    return "LOW", "#00CC66"
+    if index < 15: return "EXTREME (極めて危険)", "#FF0033"
+    if index < 30: return "VERY HIGH (非常に危険)", "#FF6600"
+    if index < 50: return "HIGH (危険)", "#FF9900"
+    if index < 70: return "MODERATE (警戒)", "#FFCC00"
+    return "LOW (注意)", "#00CC66"
 
-# ------------------------- API連携 (Robust Wrappers) -------------------------
-
-def geocode_address_mapbox(address: str) -> Optional[Tuple[float, float]]:
-    # mapboxの設定がない場合はスキップ
-    if "mapbox" not in st.secrets: return None
-    try:
-        token = st.secrets["mapbox"]["access_token"]
-        q = urllib.parse.quote(address)
-        url = f"https://api.mapbox.com/geocoding/v5/mapbox.places/{q}.json"
-        params = {"access_token": token, "limit": 1, "language": "ja"}
-        r = requests.get(url, params=params, timeout=3)
-        if r.status_code == 200:
-            feat = r.json().get("features", [])
-            if feat:
-                return feat[0]["center"][1], feat[0]["center"][0]
-    except: pass
-    return None
-
+# ------------------------- 5. 外部連携 (API) -------------------------
 def fetch_openweather(lat: float, lon: float) -> Optional[Dict]:
-    if "openweather" not in st.secrets: return None
+    """天候データを取得する。失敗時はNoneを返す"""
+    # secretsに設定がない場合はNoneを返す
+    if "openweather" not in st.secrets:
+        return None
     try:
         key = st.secrets["openweather"]["api_key"]
         url = "https://api.openweathermap.org/data/2.5/weather"
@@ -294,99 +249,85 @@ def fetch_openweather(lat: float, lon: float) -> Optional[Dict]:
     return None
 
 def get_gemini_model():
-    if "general" not in st.secrets or "api_key" not in st.secrets["general"]:
-        return None
-    try:
-        genai.configure(api_key=st.secrets["general"]["api_key"])
-        return genai.GenerativeModel("gemini-2.5-flash")
-    except: return None
+    if "general" in st.secrets and "api_key" in st.secrets["general"]:
+        try:
+            genai.configure(api_key=st.secrets["general"]["api_key"])
+            return genai.GenerativeModel("gemini-2.5-flash")
+        except: pass
+    return None
 
 def run_gemini_analysis(model, inputs: Inputs, physical: Outputs, weather_desc: str) -> str:
     prompt = f"""
-    You are a tactical fire advisor. Provide a brief, mission-critical assessment.
-    Language: Japanese.
+    あなたは災害対策本部の戦術アドバイザーです。以下の状況に基づき、現場指揮官へ簡潔に指示を出してください。
     
-    [Situation]
-    Fuel: {inputs.fuel_class}
-    Wind: {inputs.wind_speed_ms}m/s (Dir: {inputs.wind_dir_deg})
-    Humidity: {inputs.rel_humidity}%
-    Predicted Area: {physical.area_sqm:.0f} m2
-    Weather: {weather_desc}
+    [状況]
+    燃料: {inputs.fuel_class}, 風速: {inputs.wind_speed_ms}m/s, 湿度: {inputs.rel_humidity}%
+    予測延焼面積: {physical.area_sqm:.0f} m2
+    天候: {weather_desc}
     
-    [Output Format]
-    1. Threat Level Assessment (1 sentence)
-    2. Critical Risk Factor (Bullet point)
-    3. Recommended Action (Direct command style)
+    [出力フォーマット]
+    1. 現状のリスク評価 (一言で)
+    2. 最大の懸念事項 (箇条書き1点)
+    3. 推奨アクション (命令口調で)
     """
     try:
         resp = model.generate_content(prompt)
         return resp.text
-    except: return "COMMUNICATION ERROR: AI Advisor Unreachable."
+    except: return "通信エラー: AIアドバイザーに接続できません。"
 
-# ------------------------- メインアプリケーション -------------------------
+# ------------------------- 6. UI構築 (メイン) -------------------------
 
-# サイドバー：コントロールパネル
+# サイドバー: 設定パネル
 with st.sidebar:
-    st.markdown("### 🎛️ CONTROL PANEL")
+    st.markdown("### 🎛️ 作戦コントロールパネル")
     
-    with st.expander("📍 TARGET LOCATION", expanded=True):
-        input_method = st.radio("", ["Coordinates", "Address Search"], horizontal=True, label_visibility="collapsed")
-        
-        # デフォルト座標（東京）
+    with st.expander("📍 ターゲット設定 (Location)", expanded=True):
         if "lat" not in st.session_state: st.session_state.lat = 35.6812
         if "lon" not in st.session_state: st.session_state.lon = 139.7671
-
-        if input_method == "Coordinates":
-            c1, c2 = st.columns(2)
-            with c1:
-                st.session_state.lat = st.number_input("Lat", -90.0, 90.0, st.session_state.lat, format="%.4f")
-            with c2:
-                st.session_state.lon = st.number_input("Lon", -180.0, 180.0, st.session_state.lon, format="%.4f")
-        else:
-            addr = st.text_input("Address", placeholder="例: 東京都千代田区...")
-            if st.button("LOCATE TARGET"):
-                res = geocode_address_mapbox(addr)
-                if res:
-                    st.session_state.lat, st.session_state.lon = res
-                    st.success("Target Locked.")
-                else:
-                    st.error("Target Not Found.")
         
-        st.markdown("---")
-        fuel_class = st.selectbox("FUEL MODEL", ["grass", "shrub", "timber"], index=0, format_func=lambda x: x.upper())
+        c1, c2 = st.columns(2)
+        with c1:
+            st.session_state.lat = st.number_input("緯度", -90.0, 90.0, st.session_state.lat, format="%.4f")
+        with c2:
+            st.session_state.lon = st.number_input("経度", -180.0, 180.0, st.session_state.lon, format="%.4f")
+            
+        fuel_class = st.selectbox("燃料モデル", ["grass (草原)", "shrub (低木)", "timber (森林)"], index=0)
+        fuel_key = fuel_class.split()[0]
 
-    with st.expander("🌪️ ENVIRONMENT & WEATHER", expanded=True):
-        use_api = st.checkbox("LIVE DATA LINK", value=True)
+    with st.expander("🌪️ 環境・気象条件 (Weather)", expanded=True):
+        # API利用チェック
+        use_api = st.checkbox("LIVE気象データ連携", value=True)
         
-        ws, wd, rh, tp = 5.0, 90, 40, 25
-        weather_desc = "MANUAL INPUT"
+        # デフォルト値 (API失敗時用)
+        ws, wd, rh, tp = 5.0, 180, 40, 25
+        weather_desc_str = "MANUAL INPUT"
 
         if use_api:
             w_data = fetch_openweather(st.session_state.lat, st.session_state.lon)
             if w_data:
                 ws, wd, rh, tp = w_data["wind_speed"], w_data["wind_deg"], w_data["humidity"], w_data["temp_c"]
-                weather_desc = f"{w_data['description'].upper()} (LIVE)"
-                st.caption(f"📡 LINK ESTABLISHED: {tp}℃ / {rh}%")
+                weather_desc_str = f"{w_data['description']} (LIVE)"
+                st.info(f"📡 データ受信: {tp}℃ / 風{ws}m/s")
             else:
-                st.caption("⚠️ LINK OFFLINE: Using Manual Data")
+                st.caption("⚠️ API接続不可: 手動設定を使用")
         
-        # 手動オーバーライド
-        col_w1, col_w2 = st.columns(2)
-        with col_w1:
-            wind_speed_ms = st.number_input("WIND (m/s)", 0.0, 30.0, float(ws))
-            rel_humidity = st.number_input("HUMIDITY (%)", 0, 100, int(rh))
-        with col_w2:
-            wind_dir_deg = st.number_input("DIR (deg)", 0, 359, int(wd))
-            air_temp_c = st.number_input("TEMP (℃)", -10, 50, int(tp))
+        # -----【修正箇所】安全なデフォルト値を計算 -----
+        # 風向が360度で来る可能性があるため、360で割った余り(0)にするか、359以下に制限する
+        safe_wd = int(wd) % 360  # 360度(北)を0度に変換
+        safe_rh = min(100, max(0, int(rh))) # 湿度を0-100に制限
         
-        slope_percent = st.slider("SLOPE GRADE (%)", 0, 100, 10)
+        # マニュアル設定 (初期値に安全な値を渡す)
+        wind_speed_ms = st.slider("風速 (m/s)", 0.0, 30.0, float(ws))
+        wind_dir_deg = st.slider("風向 (度: 北=0)", 0, 359, safe_wd) # ここでエラー回避
+        rel_humidity = st.slider("湿度 (%)", 0, 100, safe_rh)
+        air_temp_c = st.slider("気温 (℃)", -10, 45, int(tp))
+        slope_percent = st.slider("斜面勾配 (%)", 0, 100, 10)
 
-    with st.expander("⏱️ TACTICAL PARAMS"):
-        duration_min = st.slider("PREDICTION WINDOW (min)", 10, 240, 60, step=10)
-        attack_duration = st.slider("OPS DURATION (min)", 10, 180, 60)
-        app_rate = st.number_input("WATER RATE (L/min/m)", 0.1, 50.0, 4.0)
+    with st.expander("⏱️ シミュレーション設定"):
+        duration_min = st.slider("予測時間 (分後)", 10, 180, 60, step=10)
+        app_rate = st.number_input("放水率 (L/min/m)", 0.1, 50.0, 4.0)
 
-# Inputs構築 & 計算
+# Inputs作成 & 計算実行
 inputs = Inputs(
     duration_min=duration_min,
     wind_speed_ms=wind_speed_ms,
@@ -394,160 +335,152 @@ inputs = Inputs(
     rel_humidity=rel_humidity,
     air_temp_c=air_temp_c,
     slope_percent=slope_percent,
-    fuel_class=fuel_class,
+    fuel_class=fuel_key,
     init_radius_m=5.0,
-    attack_duration_min=attack_duration,
+    attack_duration_min=60,
     app_rate_lpm_per_m=app_rate,
     efficiency=0.6
 )
 
-physical_res = run_physical_model(inputs)
-time_series_df = run_time_series_simulation(inputs)
+res = run_physical_model(inputs)
+df_ts = run_time_series_simulation(inputs)
 danger_lvl, danger_color = get_fire_danger_level(air_temp_c, rel_humidity, wind_speed_ms)
 
-# ========================== MAIN DASHBOARD ==========================
+# ===== メイン画面レイアウト =====
 
-# 1. HEADER AREA
-c_head1, c_head2 = st.columns([3, 1])
-with c_head1:
+# 1. ヘッダー情報
+col_h1, col_h2 = st.columns([3, 1])
+with col_h1:
     st.title("🔥 FIRE SPREAD COMMAND")
-    st.caption(f"SYSTEM STATUS: ONLINE | LOCATION: {st.session_state.lat:.4f}, {st.session_state.lon:.4f}")
-with c_head2:
+    st.caption(f"LOCATION: {st.session_state.lat:.4f}, {st.session_state.lon:.4f} | FUEL: {inputs.fuel_class.upper()}")
+with col_h2:
     st.markdown(f"""
-    <div style="text-align:right; margin-top:10px;">
-        <span class="danger-badge" style="background-color:{danger_color};">RISK: {danger_lvl}</span>
-        <div style="font-size:0.8em; color:#8B949E; margin-top:5px;">{weather_desc}</div>
+    <div style="text-align:right; margin-top: 15px;">
+        <span class="danger-badge" style="background-color:{danger_color};">{danger_lvl}</span>
+        <div style="font-size:0.8em; color:#888;">{weather_desc_str}</div>
     </div>
     """, unsafe_allow_html=True)
 
+# 2. HUD (Head-Up Display) メトリクス
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("予測延焼面積", f"{res.area_sqm:,.0f} m²", "TOTAL SPREAD")
+k2.metric("最前線距離", f"{res.ellipse_a_m + inputs.init_radius_m:,.0f} m", "FROM ORIGIN")
+k3.metric("延焼速度 (ROS)", f"{ros_m_per_min(inputs):.1f} m/min", "VELOCITY")
+k4.metric("推定必要水量", f"{res.water_volume_tons:,.1f} ton", "WATER REQ")
+
 st.markdown("---")
 
-# 2. HUD METRICS (KPIs)
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("PREDICTED AREA", f"{physical_res.area_sqm:,.0f} m²", "TOTAL SPREAD")
-k2.metric("HEAD DISTANCE", f"{physical_res.ellipse_a_m + inputs.init_radius_m:,.0f} m", "FROM ORIGIN")
-k3.metric("RATE OF SPREAD", f"{ros_m_per_min(inputs):.1f} m/min", "FORWARD VELOCITY")
-k4.metric("REQ. WATER", f"{physical_res.water_volume_tons:,.1f} ton", "ESTIMATED")
-
-# 3. STRATEGIC MAP & ANALYSIS
-st.markdown("### 🗺️ TACTICAL VIEW")
-col_map, col_info = st.columns([2, 1])
+# 3. 戦術マップと詳細分析
+col_map, col_detail = st.columns([1.8, 1.2])
 
 with col_map:
+    st.subheader("🗺️ TACTICAL MAP")
+    
     if HAS_FOLIUM:
-        # 暗めの地図タイルを使用してCommand Center感を演出
         m = folium.Map(
             location=[st.session_state.lat, st.session_state.lon], 
-            zoom_start=16, 
+            zoom_start=15, 
             tiles="CartoDB dark_matter"
         )
         
-        # 発生源
         folium.CircleMarker(
             [st.session_state.lat, st.session_state.lon], 
-            radius=6, color="#FF5722", fill=True, fill_opacity=1.0, 
-            popup="IGNITION POINT"
+            radius=6, color="#FF5722", fill=True, fill_opacity=1.0, popup="発火点"
         ).add_to(m)
 
-        # 延焼楕円ポリゴン生成
-        a, b = physical_res.ellipse_a_m, physical_res.ellipse_b_m
-        angle_rad = math.radians(90 - inputs.wind_dir_deg) # 北基準時計回りを数学座標に変換
-        
-        # 楕円の中心は風下にシフトする (頂点が発火点にあると仮定する簡易モデル)
-        # 実際は発火点から風下に伸びる形になるよう補正
-        center_dist = a  # 長半径分ずらすと後端が原点に来る
-        
+        # 延焼予測エリア (楕円)
+        a, b = res.ellipse_a_m, res.ellipse_b_m
         points = []
-        for t in np.linspace(0, 2*math.pi, 72):
-            # 楕円の媒介変数表示 (中心原点)
-            local_x = a * math.cos(t) + a # 原点を端にするためにシフト
-            local_y = b * math.sin(t)
+        center_lat = st.session_state.lat
+        center_lon = st.session_state.lon
+        
+        # 楕円の頂点を発火点に合わせるシフト量
+        shift_dist = a 
+        
+        for t in np.linspace(0, 2*math.pi, 60):
+            dx = shift_dist + a * math.cos(t)
+            dy = b * math.sin(t)
             
-            # 回転行列
-            rot_x = local_x * math.cos(angle_rad) - local_y * math.sin(angle_rad)
-            rot_y = local_x * math.sin(angle_rad) + local_y * math.cos(angle_rad)
+            # 風向に合わせて回転
+            # wind_dir_degは風が吹いてくる方向(From)。延焼は風下(To)へ。
+            # 数学的な回転角に変換
+            flow_angle = math.radians(inputs.wind_dir_deg - 180)
             
-            # メートル -> 緯度経度 (簡易概算: 緯度1度=111km, 経度は緯度依存)
+            rot_x = dx * math.sin(flow_angle) - dy * math.cos(flow_angle)
+            rot_y = dx * math.cos(flow_angle) + dy * math.sin(flow_angle)
+
+            # 簡易メートル->緯度経度変換
             dlat = rot_y / 111111.0
-            dlon = rot_x / (111111.0 * math.cos(math.radians(st.session_state.lat)))
+            dlon = rot_x / (111111.0 * math.cos(math.radians(center_lat)))
             
-            points.append([st.session_state.lat + dlat, st.session_state.lon + dlon])
+            points.append([center_lat - dlat, center_lon - dlon])
 
         folium.Polygon(
             locations=points,
-            color="#FF3333",
-            weight=2,
-            fill=True,
-            fill_color="#FF5722",
-            fill_opacity=0.3,
-            popup=f"Projection: {inputs.duration_min}min"
+            color="#FF3333", weight=2,
+            fill=True, fill_color="#FF5722", fill_opacity=0.4,
+            popup=f"予測範囲 ({inputs.duration_min}分後)"
         ).add_to(m)
+
+        st_folium(m, height=450, width="100%")
         
-        # 風向き矢印 (簡易表示としてラインで描画)
-        wind_end_lat = st.session_state.lat + (0.002 * math.sin(angle_rad))
-        wind_end_lon = st.session_state.lon + (0.002 * math.cos(angle_rad) / math.cos(math.radians(st.session_state.lat)))
-        folium.PolyLine(
-            locations=[[st.session_state.lat, st.session_state.lon], [wind_end_lat, wind_end_lon]],
-            color="#00BCD4", weight=3, opacity=0.6, tooltip="Wind Direction"
-        ).add_to(m)
-
-        st_folium(m, height=500, width="100%")
     else:
-        st.error("SYSTEM ERROR: Map Module 'Folium' Not Found.")
+        st.error("地図ライブラリ(folium)が見つかりません。")
 
-with col_info:
-    # タブで情報切り替え
-    tab1, tab2 = st.tabs(["📈 TRENDS", "🤖 AI ADVISOR"])
+with col_detail:
+    tab1, tab2 = st.tabs(["📈 成長予測グラフ", "🤖 AI戦術参謀"])
     
     with tab1:
-        st.markdown("###### GROWTH PROJECTION")
-        # Altairチャート (ダークテーマ対応)
-        chart_data = time_series_df.melt('time_min', value_vars=['area_sqm', 'perimeter_m'])
+        chart_data = df_ts.melt('経過時間(分)', value_vars=['延焼面積(m2)'])
         
-        base = alt.Chart(chart_data).encode(x=alt.X('time_min', title='Time (min)'))
+        c = alt.Chart(chart_data).mark_area(
+            line={'color':'#FF5722'},
+            color=alt.Gradient(
+                gradient='linear',
+                stops=[alt.GradientStop(color='#FF5722', offset=0),
+                       alt.GradientStop(color='rgba(255, 87, 34, 0.1)', offset=1)],
+                x1=1, x2=1, y1=1, y2=0
+            )
+        ).encode(
+            x='経過時間(分)',
+            y='value',
+            tooltip=['経過時間(分)', 'value']
+        ).properties(height=250)
         
-        line = base.mark_line(point=True).encode(
-            y=alt.Y('value', title='Value'),
-            color=alt.Color('variable', scale=alt.Scale(range=['#FF5722', '#00BCD4'])),
-            tooltip=['time_min', 'value', 'variable']
-        )
-        
-        st.altair_chart(line.interactive(), use_container_width=True)
-        
-        st.info(f"Efficiency Factor: {inputs.efficiency*100:.0f}% applied.")
+        st.altair_chart(c, use_container_width=True)
 
     with tab2:
-        st.markdown("###### TACTICAL ANALYSIS")
-        if st.button("REQUEST AI BRIEFING", type="primary", use_container_width=True):
-            with st.spinner("ESTABLISHING SECURE LINK..."):
-                model = get_gemini_model()
-                if model:
-                    advice = run_gemini_analysis(model, inputs, physical_res, weather_desc)
+        st.markdown("###### TACTICAL ADVISOR")
+        if st.button("AI解析を実行 (Analysis)", type="primary"):
+            model = get_gemini_model()
+            if model:
+                with st.spinner("AI参謀が戦術を立案中..."):
+                    advice = run_gemini_analysis(model, inputs, res, weather_desc_str)
                     st.markdown(f"""
-                    <div style="background-color:#0D1117; border: 1px solid #FFC107; padding: 15px; border-radius: 5px; margin-top:10px;">
-                        <div style="color:#FFC107; font-weight:bold; font-size:0.9em; margin-bottom:10px;">⚡ INCOMING TRANSMISSION</div>
-                        <div style="color:#E6EDF3; font-family:'Roboto Mono'; font-size:0.9em; line-height:1.6;">
-                            {advice.replace(chr(10), '<br>')}
-                        </div>
+                    <div class="ai-console">
+                        <strong>⚡ INCOMING TRANSMISSION</strong><br><br>
+                        {advice.replace(chr(10), '<br>')}
                     </div>
                     """, unsafe_allow_html=True)
-                else:
-                    st.error("API KEY MISSING: Check secrets.toml")
-        else:
-            st.markdown("""
-            <div style="text-align:center; color:#555; padding: 20px;">
-                WAITING FOR COMMAND...
-            </div>
-            """, unsafe_allow_html=True)
+            else:
+                st.warning("APIキー未設定: デモモード")
+                st.markdown("""
+                <div class="ai-console">
+                    <strong>⚡ DEMO TRANSMISSION</strong><br>
+                    1. リスク評価: HIGH (警戒レベル)<br>
+                    2. 懸念事項: 風向の変化による市街地への延焼<br>
+                    3. アクション: 東側側面の防御線を優先構築せよ
+                </div>
+                """, unsafe_allow_html=True)
 
-# 4. FOOTER / DOWNLOAD
+# 4. データエクスポート
 st.markdown("---")
-with st.expander("📂 EXPORT MISSION DATA"):
-    st.dataframe(time_series_df, use_container_width=True)
-    csv = time_series_df.to_csv(index=False).encode('utf-8')
+with st.expander("📂 作戦ログの出力 (Export Data)"):
+    st.dataframe(df_ts, use_container_width=True)
+    csv = df_ts.to_csv(index=False).encode('utf-8')
     st.download_button(
-        "DOWNLOAD CSV LOG",
+        "CSV形式でダウンロード",
         data=csv,
-        file_name="mission_log.csv",
+        file_name="fire_simulation_log.csv",
         mime="text/csv"
     )
