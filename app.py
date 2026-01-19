@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Fire Spread Command Center Ver.3.2 (Full Feature Edition)
+Fire Spread Command Center Ver.3.3 (Japanese Edition)
 ----------------------------------------------------------------
-- UI: Command Center Style (Dark Mode / HUD)
-- Feature: Address Search (Mapbox) & Weather API (OpenWeather) fully integrated
-- Safety: Robust error handling for API values
+- コンセプト: 災害対策本部・司令塔ダッシュボード (完全日本語化)
+- 機能: 住所検索(Mapbox), 気象取得(OpenWeather), AI戦術(Gemini)
+- 安全性: API数値の安全処理実装済み
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ except ImportError:
 
 # ------------------------- 1. システム起動設定 -------------------------
 st.set_page_config(
-    page_title="FIRE COMMAND CENTER",
+    page_title="災害対策本部コマンドセンター",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -44,7 +44,7 @@ def inject_custom_css():
         /* 全体設定: ダークテーマ */
         .stApp {
             background-color: #0E1117;
-            font-family: 'Roboto', sans-serif;
+            font-family: 'Noto Sans JP', 'Hiragino Sans', 'Meiryo', sans-serif;
         }
         h1, h2, h3 { color: #E6E6E6 !important; letter-spacing: 0.05em; }
         
@@ -67,14 +67,14 @@ def inject_custom_css():
             border-color: #FF5722;
             transform: translateY(-2px);
         }
-        div[data-testid="stMetric"] label { color: #8B949E !important; }
+        div[data-testid="stMetric"] label { color: #8B949E !important; font-size: 0.8rem !important; }
         div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
             color: #F0F6FC !important;
             font-family: 'Courier New', monospace;
             font-weight: bold;
         }
 
-        /* バッジスタイル */
+        /* ステータスバッジ */
         .status-badge {
             display: inline-block;
             padding: 4px 12px;
@@ -82,6 +82,7 @@ def inject_custom_css():
             font-weight: bold;
             color: #fff;
             letter-spacing: 0.1em;
+            font-size: 0.9em;
         }
         
         /* AI通信コンソール */
@@ -93,6 +94,8 @@ def inject_custom_css():
             border-radius: 0 4px 4px 0;
             font-family: 'Courier New', monospace;
             color: #C9D1D9;
+            font-size: 0.9em;
+            line-height: 1.6;
         }
     </style>
     """, unsafe_allow_html=True)
@@ -123,6 +126,7 @@ class Outputs:
     ellipse_b_m: float
     perimeter_m: float
 
+# 燃料モデル定数
 BASE_RATE_BY_FUEL = {"grass": 8.0, "shrub": 3.0, "timber": 0.6}
 HUMIDITY_K = 1.1
 WIND_A = 0.10
@@ -157,6 +161,7 @@ def run_physical_model(inp: Inputs) -> Outputs:
     B = max(EPS, A / lb)
     
     area = math.pi * A * B
+    # ラマヌジャンの近似式
     h = ((A - B) ** 2) / ((A + B) ** 2 + EPS)
     perimeter = math.pi * (A + B) * (1 + (3*h)/(10 + math.sqrt(4 - 3*h + EPS)))
     
@@ -177,7 +182,7 @@ def run_time_series_simulation(inp: Inputs, steps: int = 20) -> pd.DataFrame:
         A = ros * t + inp.init_radius_m
         B = max(EPS, A / lb)
         area = math.pi * A * B
-        results.append({"Time (min)": t, "Area (m2)": area})
+        results.append({"経過時間(分)": t, "延焼面積(m2)": area})
     return pd.DataFrame(results)
 
 def get_risk_level(temp, humid, wind):
@@ -185,15 +190,15 @@ def get_risk_level(temp, humid, wind):
     if wind > 10.0: idx -= 15
     elif wind > 5.0: idx -= 5
     
-    if idx < 15: return "EXTREME", "#FF0033"
-    if idx < 30: return "VERY HIGH", "#FF6600"
-    if idx < 50: return "HIGH", "#FF9900"
-    if idx < 70: return "MODERATE", "#FFCC00"
-    return "LOW", "#00CC66"
+    if idx < 15: return "EXTREME (極めて危険)", "#FF0033"
+    if idx < 30: return "VERY HIGH (非常に危険)", "#FF6600"
+    if idx < 50: return "HIGH (危険)", "#FF9900"
+    if idx < 70: return "MODERATE (警戒)", "#FFCC00"
+    return "LOW (注意)", "#00CC66"
 
 # ------------------------- 4. 外部API連携機能 -------------------------
 
-# 【重要】住所検索機能 (Mapbox)
+# 【住所検索機能】 Mapbox API
 def geocode_address_mapbox(address: str) -> Optional[Tuple[float, float]]:
     if "mapbox" not in st.secrets:
         return None
@@ -210,13 +215,13 @@ def geocode_address_mapbox(address: str) -> Optional[Tuple[float, float]]:
     except: pass
     return None
 
-# 気象情報取得 (OpenWeather)
+# 【気象情報】 OpenWeather API
 def fetch_weather(lat, lon) -> Optional[Dict]:
     if "openweather" not in st.secrets: return None
     try:
         key = st.secrets["openweather"]["api_key"]
         url = "https://api.openweathermap.org/data/2.5/weather"
-        params = {"lat": lat, "lon": lon, "appid": key, "units": "metric"}
+        params = {"lat": lat, "lon": lon, "appid": key, "units": "metric", "lang": "ja"}
         r = requests.get(url, params=params, timeout=3)
         if r.status_code == 200:
             d = r.json()
@@ -230,7 +235,7 @@ def fetch_weather(lat, lon) -> Optional[Dict]:
     except: pass
     return None
 
-# Gemini AI
+# 【AI参謀】 Gemini API
 def get_gemini_response(prompt):
     if "general" in st.secrets and "api_key" in st.secrets["general"]:
         try:
@@ -238,73 +243,75 @@ def get_gemini_response(prompt):
             model = genai.GenerativeModel("gemini-2.5-flash")
             return model.generate_content(prompt).text
         except: pass
-    return "AI SYSTEM OFFLINE: Unable to establish link."
+    return "AIシステム応答なし: 安全な通信を確立できませんでした。"
 
 # ------------------------- 5. メイン画面 UI -------------------------
 
 # サイドバー設定
 with st.sidebar:
-    st.markdown("### 🎛️ SYSTEM CONTROL")
+    st.markdown("### 🎛️ 作戦コントロールパネル")
     
-    # --- ロケーション設定 (住所検索復活) ---
-    with st.expander("📍 TARGET LOCATION", expanded=True):
+    # --- ロケーション設定 (住所検索あり) ---
+    with st.expander("📍 対象地域設定 (Location)", expanded=True):
         # 入力モード切替
-        loc_mode = st.radio("Input Mode", ["Coordinates", "Address Search"], label_visibility="collapsed")
+        loc_mode = st.radio("入力モード", ["座標入力", "住所検索"], horizontal=True, label_visibility="collapsed")
         
         if "lat" not in st.session_state: st.session_state.lat = 35.6812
         if "lon" not in st.session_state: st.session_state.lon = 139.7671
 
-        if loc_mode == "Address Search":
-            addr_input = st.text_input("Search Target", placeholder="Ex: Tokyo Tower...")
-            if st.button("LOCATE TARGET"):
+        if loc_mode == "住所検索":
+            addr_input = st.text_input("住所を入力", placeholder="例: 東京都千代田区...")
+            if st.button("対象地域を特定"):
                 if "mapbox" in st.secrets:
                     res = geocode_address_mapbox(addr_input)
                     if res:
                         st.session_state.lat, st.session_state.lon = res
-                        st.success("TARGET LOCKED.")
+                        st.success("ターゲット補足完了")
                         time.sleep(0.5)
                         st.rerun()
                     else:
-                        st.error("TARGET NOT FOUND.")
+                        st.error("住所が見つかりませんでした")
                 else:
-                    st.warning("Mapbox API Key missing in secrets.toml")
+                    st.warning("Mapbox APIキーが設定されていません")
         else:
             c1, c2 = st.columns(2)
-            with c1: st.session_state.lat = st.number_input("Lat", -90.0, 90.0, st.session_state.lat, format="%.4f")
-            with c2: st.session_state.lon = st.number_input("Lon", -180.0, 180.0, st.session_state.lon, format="%.4f")
+            with c1: st.session_state.lat = st.number_input("緯度", -90.0, 90.0, st.session_state.lat, format="%.4f")
+            with c2: st.session_state.lon = st.number_input("経度", -180.0, 180.0, st.session_state.lon, format="%.4f")
 
-        fuel_type = st.selectbox("FUEL MODEL", ["grass", "shrub", "timber"], index=0)
+        fuel_labels = {"grass": "草原 (Grass)", "shrub": "低木 (Shrub)", "timber": "森林 (Timber)"}
+        fuel_type_label = st.selectbox("燃料モデル", list(fuel_labels.values()), index=0)
+        fuel_type = [k for k, v in fuel_labels.items() if v == fuel_type_label][0]
 
     # --- 気象設定 (エラー対策済み) ---
-    with st.expander("🌪️ WEATHER CONDITIONS", expanded=True):
-        use_api = st.checkbox("LIVE DATA LINK", value=True)
+    with st.expander("🌪️ 気象条件設定 (Weather)", expanded=True):
+        use_api = st.checkbox("LIVE気象データ連携", value=True)
         
         # デフォルト値
         ws, wd, rh, tp = 5.0, 0, 40, 25
-        w_desc = "MANUAL"
+        w_desc = "手動入力モード"
 
         if use_api:
             w_data = fetch_weather(st.session_state.lat, st.session_state.lon)
             if w_data:
                 ws, wd, rh, tp = w_data["wind"], w_data["deg"], w_data["humid"], w_data["temp"]
-                w_desc = f"{w_data['desc'].upper()} (LIVE)"
-                st.caption(f"📡 LINK ESTABLISHED: {tp}℃ / {rh}%")
+                w_desc = f"{w_data['desc']} (LIVE)"
+                st.caption(f"📡 データ受信中: {tp}℃ / {rh}%")
             else:
-                st.caption("⚠️ LINK FAILED: Manual Mode")
+                st.caption("⚠️ 接続失敗: 手動入力を使用")
 
-        # 安全な値を計算 (360度問題を回避)
+        # 安全な値を計算 (360度問題等を回避)
         safe_wd = int(wd) % 360
         safe_rh = clamp(int(rh), 0, 100)
 
-        wind_speed = st.slider("WIND SPEED (m/s)", 0.0, 30.0, float(ws))
-        wind_dir = st.slider("WIND DIR (deg)", 0, 359, safe_wd) # Fix applied
-        humidity = st.slider("HUMIDITY (%)", 0, 100, safe_rh)
-        temp = st.slider("TEMP (℃)", -10, 50, int(tp))
-        slope = st.slider("SLOPE (%)", 0, 100, 10)
+        wind_speed = st.slider("風速 (m/s)", 0.0, 30.0, float(ws))
+        wind_dir = st.slider("風向 (度: 北=0)", 0, 359, safe_wd) 
+        humidity = st.slider("湿度 (%)", 0, 100, safe_rh)
+        temp = st.slider("気温 (℃)", -10, 50, int(tp))
+        slope = st.slider("斜面勾配 (%)", 0, 100, 10)
 
-    with st.expander("⏱️ SIMULATION PARAMS"):
-        duration = st.slider("PREDICTION TIME (min)", 10, 180, 60, step=10)
-        app_rate = st.number_input("WATER RATE (L/min/m)", 0.1, 50.0, 4.0)
+    with st.expander("⏱️ シミュレーション設定"):
+        duration = st.slider("予測時間 (分後)", 10, 180, 60, step=10)
+        app_rate = st.number_input("放水率 (L/min/m)", 0.1, 50.0, 4.0)
 
 # 計算実行
 inp = Inputs(duration, wind_speed, wind_dir, humidity, temp, slope, fuel_type, 5.0, 60, app_rate, 0.6)
@@ -312,69 +319,70 @@ out = run_physical_model(inp)
 df_res = run_time_series_simulation(inp)
 risk_lvl, risk_col = get_risk_level(temp, humidity, wind_speed)
 
-# ===== DASHBOARD VIEW =====
+# ===== DASHBOARD VIEW (メイン画面) =====
 
-# Header
+# ヘッダー
 c1, c2 = st.columns([3, 1])
 with c1:
-    st.title("🔥 FIRE COMMAND CENTER")
-    st.caption(f"LOC: {st.session_state.lat:.4f}, {st.session_state.lon:.4f} | FUEL: {fuel_type.upper()}")
+    st.title("🔥 災害対策本部コマンドセンター")
+    st.caption(f"作戦地域: {st.session_state.lat:.4f}, {st.session_state.lon:.4f} | 燃料タイプ: {fuel_labels[fuel_type]}")
 with c2:
     st.markdown(f"""
     <div style="text-align:right; margin-top:10px;">
-        <span class="status-badge" style="background-color:{risk_col};">{risk_lvl}</span>
-        <div style="color:#888; font-size:0.8em;">{w_desc}</div>
+        <span class="status-badge" style="background-color:{risk_col};">RISK: {risk_lvl}</span>
+        <div style="color:#888; font-size:0.8em; margin-top:5px;">{w_desc}</div>
     </div>
     """, unsafe_allow_html=True)
 
-# HUD
+# HUD (ヘッドアップディスプレイ)
 k1, k2, k3, k4 = st.columns(4)
-k1.metric("PREDICTED AREA", f"{out.area_sqm:,.0f} m²", "TOTAL")
-k2.metric("HEAD DISTANCE", f"{out.ellipse_a_m + 5.0:,.0f} m", "FROM ORIGIN")
-k3.metric("SPREAD RATE", f"{ros_m_per_min(inp):.1f} m/min", "VELOCITY")
-k4.metric("WATER REQ", f"{out.water_volume_tons:,.1f} ton", "ESTIMATED")
+k1.metric("予測延焼面積", f"{out.area_sqm:,.0f} m²", "TOTAL SPREAD")
+k2.metric("最前線到達距離", f"{out.ellipse_a_m + 5.0:,.0f} m", "FROM ORIGIN")
+k3.metric("延焼速度 (ROS)", f"{ros_m_per_min(inp):.1f} m/min", "VELOCITY")
+k4.metric("推定必要水量", f"{out.water_volume_tons:,.1f} ton", "WATER REQ")
 
 st.markdown("---")
 
-# Map & Graph
+# 地図とグラフエリア
 m_col, g_col = st.columns([1.8, 1.2])
 
 with m_col:
-    st.subheader("🗺️ TACTICAL MAP")
+    st.subheader("🗺️ 戦術マップ (Tactical Map)")
     if HAS_FOLIUM:
         m = folium.Map([st.session_state.lat, st.session_state.lon], zoom_start=15, tiles="CartoDB dark_matter")
         
-        # Origin
+        # 発生源マーカー
         folium.CircleMarker(
-            [st.session_state.lat, st.session_state.lon], radius=5, color="#FF5722", fill=True, fill_opacity=1
+            [st.session_state.lat, st.session_state.lon], radius=5, color="#FF5722", fill=True, fill_opacity=1, popup="発火点"
         ).add_to(m)
 
-        # Ellipse Calculation for Map
+        # 延焼楕円の描画計算
         a, b = out.ellipse_a_m, out.ellipse_b_m
         pts = []
-        angle_rad = math.radians(wind_dir - 180) # Wind Direction vs Spread Direction
+        angle_rad = math.radians(wind_dir - 180) # 風向(来る方向)から拡散方向へ変換
         center_lat, center_lon = st.session_state.lat, st.session_state.lon
         
         for t in np.linspace(0, 2*math.pi, 60):
-            # Shift center so origin is at one focus/edge approx
+            # 焦点を発火点に寄せるためのシフト
             dx = a + a * math.cos(t)
             dy = b * math.sin(t)
             
-            # Rotate
+            # 回転行列
             rx = dx * math.sin(angle_rad) - dy * math.cos(angle_rad)
             ry = dx * math.cos(angle_rad) + dy * math.sin(angle_rad)
             
+            # 簡易座標変換
             dlat = ry / 111111.0
             dlon = rx / (111111.0 * math.cos(math.radians(center_lat)))
             pts.append([center_lat - dlat, center_lon - dlon])
             
-        folium.Polygon(pts, color="#FF3333", fill=True, fill_color="#FF5722", fill_opacity=0.3).add_to(m)
+        folium.Polygon(pts, color="#FF3333", fill=True, fill_color="#FF5722", fill_opacity=0.3, popup="予測延焼範囲").add_to(m)
         st_folium(m, height=450, width="100%")
     else:
-        st.error("Folium module missing.")
+        st.error("地図モジュール (Folium) が読み込めません。")
 
 with g_col:
-    tab1, tab2 = st.tabs(["📈 TRENDS", "🤖 AI ADVISOR"])
+    tab1, tab2 = st.tabs(["📈 拡大推移", "🤖 AI戦術参謀"])
     with tab1:
         c = alt.Chart(df_res).mark_area(
             line={'color':'#FF5722'},
@@ -383,22 +391,39 @@ with g_col:
                 stops=[alt.GradientStop(color='#FF5722', offset=0), alt.GradientStop(color='rgba(255,87,34,0.1)', offset=1)],
                 x1=1, x2=1, y1=1, y2=0
             )
-        ).encode(x='Time (min)', y='Area (m2)', tooltip=['Time (min)', 'Area (m2)']).properties(height=250)
+        ).encode(
+            x=alt.X('経過時間(分)', title='経過時間 (min)'),
+            y=alt.Y('延焼面積(m2)', title='延焼面積 (m²)'),
+            tooltip=['経過時間(分)', '延焼面積(m2)']
+        ).properties(height=250)
         st.altair_chart(c, use_container_width=True)
         
     with tab2:
-        if st.button("INITIATE AI ANALYSIS", type="primary"):
-            with st.spinner("PROCESSING TACTICAL DATA..."):
-                prompt = f"Fire Situation: Fuel {fuel_type}, Wind {wind_speed}m/s, Humid {humidity}%. Est Area {out.area_sqm:.0f}m2. Provide tactical advice in Japanese (Bullet points)."
+        if st.button("AI解析を実行 (Analysis)", type="primary"):
+            with st.spinner("戦術データを解析中..."):
+                prompt = f"""
+                あなたは災害対策本部の戦術アドバイザーです。以下の火災状況に基づき、現場指揮官へ日本語で簡潔に指示を出してください。
+                [状況]
+                燃料: {fuel_labels[fuel_type]}
+                風速: {wind_speed}m/s
+                湿度: {humidity}%
+                予測延焼面積: {out.area_sqm:.0f} m2
+                天候: {w_desc}
+                
+                [出力形式]
+                1. 現状のリスク評価 (一言で)
+                2. 最大の懸念事項 (箇条書き1点)
+                3. 推奨アクション (断定的な命令口調で)
+                """
                 res_txt = get_gemini_response(prompt)
                 st.markdown(f"""
                 <div class="ai-console">
-                    <strong>⚡ INCOMING TRANSMISSION</strong><br><br>
+                    <strong>⚡ 受信メッセージ (INCOMING)</strong><br><br>
                     {res_txt.replace(chr(10), '<br>')}
                 </div>""", unsafe_allow_html=True)
 
-# Export
+# エクスポート
 st.markdown("---")
-with st.expander("📂 MISSION DATA EXPORT"):
+with st.expander("📂 作戦ログ出力 (Data Export)"):
     st.dataframe(df_res, use_container_width=True)
-    st.download_button("DOWNLOAD CSV LOG", df_res.to_csv(index=False).encode('utf-8'), "mission_log.csv", "text/csv")
+    st.download_button("CSVログをダウンロード", df_res.to_csv(index=False).encode('utf-8'), "mission_log.csv", "text/csv")
